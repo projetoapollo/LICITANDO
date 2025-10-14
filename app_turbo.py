@@ -1,17 +1,19 @@
-# app_turbo.py
-import os
+import os, sys
 import streamlit as st
 
-# ==============================
-# CONFIGURAÇÕES INICIAIS
-# ==============================
+# 1) SEMPRE primeiro:
 st.set_page_config(
     page_title="Appolari Turbo IA",
     layout="centered",
     page_icon="🧠",
 )
 
-st.title("🛠️ Sistema Appolari Turbo V3.2")
+# 2) Debug inicial (pode remover depois):
+st.write("APP iniciou ✅")
+st.write("Python:", sys.version)
+st.write("Vars:", {k: os.environ[k] for k in ["PYTHONUNBUFFERED","STREAMLIT_SERVER_HEADLESS"] if k in os.environ})
+
+st.title("🧠 Sistema Appolari Turbo V3.2")
 st.success("Aplicação carregada com sucesso! ✅")
 
 # ==============================
@@ -114,3 +116,4 @@ else:
 
 st.divider()
 st.caption("Desenvolvido por Pai Appolari e Filho Coop 💚")
+
