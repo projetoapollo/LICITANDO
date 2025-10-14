@@ -1,4 +1,4 @@
-render.yamlservices:
+services:
   - type: web
     name: LICITANDO
     env: python
