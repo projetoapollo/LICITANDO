@@ -1,199 +1,239 @@
 # price_search.py
-# ----------------------------------------------------
-# Busca/estima preços para os itens do DF do PDF.
-#
-# Como funciona:
-# - (Opcional) Lê um catálogo local em data/catalogo_precos.csv
-#   com as colunas: descricao, unidade, preco, mercado, fonte, [codigo]
-# - Faz matching por similaridade de texto (0..1) + unidade/código,
-#   aplica min_score, calcula média e agrega fontes/mercados.
-#
-# Assinatura:
-#   buscar_precos(df: pd.DataFrame, min_score: float = 0.70)
-#     -> (valores_medios: List[float|None],
-#         mercados: List[str],
-#         fontes:  List[str])
-# ----------------------------------------------------
+# Consulta de preços no catálogo local data/catalogo_precos.csv
+# Compatível com preço usando vírgula ou ponto como separador decimal.
 
 from __future__ import annotations
-from typing import List, Tuple, Optional
 import os
 import math
-import csv
-import unicodedata
-from difflib import SequenceMatcher
-from statistics import fmean
-
 import pandas as pd
+from functools import lru_cache
+from typing import Optional, Tuple, List
 
-# Caminho padrão do catálogo local
 CATALOGO_PATH = os.path.join("data", "catalogo_precos.csv")
 
-# Nomes de colunas esperadas no DF de entrada
-COL_DESC = "Descrição resumida PDF"
-COL_UNID = "Unidade"
-COL_COD  = "Código PDF"
+# ---------------------------------------------
+# Utilidades
+# ---------------------------------------------
+def _to_float_any(price) -> Optional[float]:
+    """
+    Converte string de preço em float aceitando formatos:
+    - "2,90"  => 2.90
+    - "2.90"  => 2.90
+    - "1.234,56" => 1234.56
+    - "1,234.56" => 1234.56
+    Retorna None se não conseguir converter.
+    """
+    if price is None or (isinstance(price, float) and math.isnan(price)):
+        return None
 
-def _strip_accents(s: str) -> str:
-    """Remove acentos para facilitar o matching."""
+    if isinstance(price, (int, float)):
+        return float(price)
+
+    s = str(price).strip()
+    if not s:
+        return None
+
+    # Se contém vírgula, assumimos estilo “brasileiro” e removemos separadores de milhar.
+    if "," in s:
+        s = s.replace(".", "")  # remove milhar
+        s = s.replace(",", ".")  # vírgula decimal -> ponto
+
+    # Caso contrário, já deve estar em estilo “ponto decimal”.
     try:
-        return "".join(
-            ch for ch in unicodedata.normalize("NFKD", s)
-            if not unicodedata.combining(ch)
-        )
+        return float(s)
     except Exception:
-        return s
+        return None
 
-def _norm_text(s: Optional[str]) -> str:
-    if s is None:
-        return ""
-    s2 = _strip_accents(str(s)).lower().strip()
-    # simplificações leves
-    return " ".join(s2.split())
 
-def _similaridade(a: str, b: str) -> float:
-    """0..1 — usa SequenceMatcher (rápido e sem deps externas)."""
-    a2, b2 = _norm_text(a), _norm_text(b)
-    if not a2 or not b2:
-        return 0.0
-    return SequenceMatcher(None, a2, b2).ratio()
+def _norm_text(x: str) -> str:
+    return " ".join(str(x).strip().upper().split())
 
-def _carregar_catalogo(path: str = CATALOGO_PATH) -> List[dict]:
-    """Carrega o CSV de catálogo se existir. Caso contrário, lista vazia."""
-    if not os.path.exists(path):
-        return []
-    out: List[dict] = []
-    with open(path, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # normaliza campos conhecidos
-            row_norm = {
-                "descricao": row.get("descricao", ""),
-                "unidade":   row.get("unidade", ""),
-                "preco":     row.get("preco", ""),
-                "mercado":   row.get("mercado", ""),
-                "fonte":     row.get("fonte", ""),
-                "codigo":    row.get("codigo", ""),  # opcional
-            }
-            # tenta converter preco
-            preco_raw = str(row_norm["preco"]).strip().replace(".", "").replace(",", ".")
-            try:
-                row_norm["preco"] = float(preco_raw)
-            except Exception:
-                row_norm["preco"] = None
-            out.append(row_norm)
-    return out
 
-def _match_item(
-    desc_item: str,
-    unid_item: str,
-    cod_item: str,
-    catalogo: List[dict],
-    min_score: float
-) -> Tuple[Optional[float], str, str]:
+# ---------------------------------------------
+# Leitura do catálogo (com cache)
+# ---------------------------------------------
+@lru_cache(maxsize=1)
+def load_catalogo() -> pd.DataFrame:
     """
-    Retorna (preco_medio, mercados_concat, fontes_concat) para um item.
-    - Tenta match forte por código (se existir em ambos).
-    - Caso não, usa similaridade na descrição, filtrando por unidade (se houver).
+    Lê data/catalogo_precos.csv com cabeçalho:
+    descricao,unidade,preco,mercado,fonte,codigo
+    Faz limpeza de textos e conversão de preço para float.
     """
-    if not catalogo:
+    if not os.path.exists(CATALOGO_PATH):
+        # retorna DF vazio com colunas esperadas
+        return pd.DataFrame(
+            columns=["descricao", "unidade", "preco", "mercado", "fonte", "codigo"]
+        )
+
+    df = pd.read_csv(CATALOGO_PATH, dtype=str, keep_default_na=False)
+    # Garante colunas
+    for col in ["descricao", "unidade", "preco", "mercado", "fonte", "codigo"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    # Normalizações
+    df["descricao_norm"] = df["descricao"].map(_norm_text)
+    df["unidade_norm"] = df["unidade"].map(_norm_text)
+    df["codigo_norm"] = df["codigo"].map(lambda x: _norm_text(x).replace(" ", ""))  # remove espaços
+    df["preco_float"] = df["preco"].map(_to_float_any)
+
+    # Remove linhas sem preço válido
+    df = df[~df["preco_float"].isna()].copy()
+
+    return df
+
+
+# ---------------------------------------------
+# Matching e agregação
+# ---------------------------------------------
+def _match_por_codigo(catalogo: pd.DataFrame, codigo_pdf: str) -> pd.DataFrame:
+    cod = _norm_text(codigo_pdf).replace(" ", "")
+    if not cod:
+        return catalogo.iloc[0:0]
+    return catalogo.loc[catalogo["codigo_norm"] == cod]
+
+
+def _match_por_descricao(catalogo: pd.DataFrame, desc_pdf: str) -> pd.DataFrame:
+    """
+    Fallback simples: contém todos os termos da descrição (normalizada).
+    """
+    desc = _norm_text(desc_pdf)
+    if not desc:
+        return catalogo.iloc[0:0]
+
+    termos = [t for t in desc.split() if len(t) >= 3]  # ignora termos mto curtos
+    if not termos:
+        return catalogo.iloc[0:0]
+
+    mask = pd.Series(True, index=catalogo.index)
+    for t in termos:
+        mask &= catalogo["descricao_norm"].str.contains(t, na=False)
+
+    return catalogo[mask]
+
+
+def _agregar_resultados(df_matches: pd.DataFrame) -> Tuple[Optional[float], str, str]:
+    """
+    Calcula média de preço + compõe campos Mercado e Fonte (únicos, separados por '; ').
+    """
+    if df_matches.empty:
         return None, "", ""
 
-    desc_item_n = _norm_text(desc_item)
-    unid_item_n = _norm_text(unid_item)
-    cod_item_n  = _norm_text(cod_item)
+    media = df_matches["preco_float"].mean()
 
-    candidatos: List[Tuple[float, dict]] = []
+    # Juntar mercados e fontes distintos
+    mercados = (
+        df_matches["mercado"]
+        .fillna("")
+        .map(str)
+        .map(str.strip)
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+    )
+    fontes = (
+        df_matches["fonte"]
+        .fillna("")
+        .map(str)
+        .map(str.strip)
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+    )
 
-    # 1) Se temos código, tenta match exato de código (mais forte)
-    if cod_item_n:
-        for row in catalogo:
-            cod_cat = _norm_text(row.get("codigo", ""))
-            if cod_cat and cod_cat == cod_item_n and row.get("preco") is not None:
-                candidatos.append((1.0, row))  # score 1.0 por código idêntico
+    mercados_str = "; ".join(mercados) if len(mercados) else ""
+    fontes_str = "; ".join(fontes) if len(fontes) else ""
 
-    # 2) Caso não haja por código suficiente, usa descrição
-    if not candidatos:
-        for row in catalogo:
-            desc_cat = row.get("descricao", "")
-            unid_cat = row.get("unidade", "")
-            preco    = row.get("preco", None)
+    return float(media), mercados_str, fontes_str
 
-            if preco is None:
-                continue
 
-            # Se a unidade está preenchida no item, preferimos bater unidade
-            if unid_item_n and _norm_text(unid_cat) and _norm_text(unid_cat) != unid_item_n:
-                continue  # unidades diferentes, pula
-
-            score = _similaridade(desc_item, desc_cat)
-            if score >= min_score:
-                candidatos.append((score, row))
-
-    if not candidatos:
-        return None, "", ""
-
-    # Ordena por maior score
-    candidatos.sort(key=lambda x: x[0], reverse=True)
-
-    # Podemos pegar os top-K; aqui, pego todos >= min_score (ou todos por código)
-    precos = [c[1]["preco"] for c in candidatos if c[1].get("preco") is not None]
-    if not precos:
-        return None, "", ""
-
-    # Média robusta (fmean é rápido; se quiser, dá pra filtrar outliers depois)
-    preco_medio = float(fmean(precos))
-
-    # Agrega mercados e fontes únicos (mantendo ordem de aparição)
-    def _uniq_keep(seq: List[str]) -> List[str]:
-        seen = set()
-        out: List[str] = []
-        for s in seq:
-            s2 = (s or "").strip()
-            if not s2:
-                continue
-            if s2 not in seen:
-                seen.add(s2)
-                out.append(s2)
-        return out
-
-    mercados = _uniq_keep([c[1].get("mercado", "") for c in candidatos])
-    fontes   = _uniq_keep([c[1].get("fonte", "")   for c in candidatos])
-
-    mercados_s = "; ".join(mercados)[:500]  # evita campos enormes
-    fontes_s   = "; ".join(fontes)[:500]
-
-    return preco_medio, mercados_s, fontes_s
-
-def buscar_precos(df: pd.DataFrame, min_score: float = 0.70) -> Tuple[List[Optional[float]], List[str], List[str]]:
+# ---------------------------------------------
+# API pública usada pelo app
+# ---------------------------------------------
+def aplicar_catalogo_em_df(df_itens: pd.DataFrame) -> pd.DataFrame:
     """
-    Recebe o DataFrame base (itens do PDF) e retorna:
-      - valores_medios: lista de floats (ou None) por item
-      - mercados:       descrição de onde foi encontrado (string)
-      - fontes:         lista/concat de sites (string)
-
-    Observações:
-    - Se não houver catálogo local, retorna None/"" sem quebrar o app.
-    - min_score controla o corte de similaridade para os matches por DESCRIÇÃO.
-      (Se houver match por CÓDIGO, usa score 1.0)
+    Recebe o DataFrame extraído do PDF (com colunas como 'Código PDF', 'Descrição resumida PDF', 'Unidade')
+    e preenche:
+        - 'Valor médio do produto'
+        - 'Descrição localidade / Mercado'
+        - 'Fontes'
+    Retorna uma CÓPIA do DF com as colunas novas.
     """
-    n = len(df)
-    valores_medios: List[Optional[float]] = [None] * n
-    mercados: List[str] = [""] * n
-    fontes:  List[str] = [""] * n
+    df = df_itens.copy()
 
-    catalogo = _carregar_catalogo(CATALOGO_PATH)
+    # Garante colunas de saída
+    if "Valor médio do produto" not in df.columns:
+        df["Valor médio do produto"] = pd.NA
+    if "Descrição localidade / Mercado" not in df.columns:
+        df["Descrição localidade / Mercado"] = pd.NA
+    if "Fontes" not in df.columns:
+        df["Fontes"] = pd.NA
 
-    # Itera sobre o DF de entrada
-    for i, row in df.iterrows():
-        desc = str(row.get(COL_DESC, "") or "").strip()
-        unid = str(row.get(COL_UNID, "") or "").strip()
-        cod  = str(row.get(COL_COD,  "") or "").strip()
+    catalogo = load_catalogo()
 
-        preco, merc, font = _match_item(desc, unid, cod, catalogo, min_score=min_score)
-        # Guarda resultados
-        valores_medios[i] = float(preco) if (preco is not None and not math.isnan(preco)) else None
-        mercados[i] = merc
-        fontes[i] = font
+    # Se catálogo estiver vazio, só devolvemos o DF sem alterações
+    if catalogo.empty:
+        return df
 
-    return valores_medios, mercados, fontes
+    # Colunas de entrada (nomes conforme nosso app)
+    col_codigo = None
+    col_desc = None
+    col_unid = None
+
+    # tenta detectar nomes das colunas do app atual
+    for c in df.columns:
+        cn = c.lower()
+        if col_codigo is None and ("código pdf" in cn or "codigo pdf" in cn or cn == "codigo"):
+            col_codigo = c
+        if col_desc is None and ("descrição resumida" in cn or "descricao resumida" in cn or "descrição" in cn or "descricao" in cn):
+            col_desc = c
+        if col_unid is None and ("unidade" in cn):
+            col_unid = c
+
+    # Preenchimento linha a linha (suficiente para o catálogo local)
+    valores: List[Optional[float]] = []
+    mercados_out: List[str] = []
+    fontes_out: List[str] = []
+
+    for _, row in df.iterrows():
+        cod = str(row[col_codigo]) if col_codigo else ""
+        desc = str(row[col_desc]) if col_desc else ""
+        unid = str(row[col_unid]) if col_unid else ""
+
+        # 1) tenta por código
+        m = _match_por_codigo(catalogo, cod)
+        if m.empty:
+            # 2) fallback por descrição
+            m = _match_por_descricao(catalogo, desc)
+
+        media, mercados, fontes = _agregar_resultados(m)
+        valores.append(None if media is None else round(media, 2))
+        mercados_out.append(mercados)
+        fontes_out.append(fontes)
+
+    df["Valor médio do produto"] = valores
+    df["Descrição localidade / Mercado"] = mercados_out
+    df["Fontes"] = fontes_out
+
+    return df
+
+
+# Mantém um nome curto para integração com o app existente
+def buscar_precos(df_itens: pd.DataFrame) -> pd.DataFrame:
+    """
+    Alias compatível com o app: retorna df com colunas de preço preenchidas.
+    """
+    return aplicar_catalogo_em_df(df_itens)
+
+
+# Execução isolada para teste local rápido
+if __name__ == "__main__":
+    # Exemplo mínimo de teste (roda localmente se quiser)
+    exemplo = pd.DataFrame({
+        "Código PDF": ["047.003.388", "045.010.540"],
+        "Descrição resumida PDF": ["ADAPTADOR PVC 3/4", "ANEL DE BORRACHA 3/4"],
+        "Unidade": ["UNIDADE", "PECA"],
+        "Quantidade": [84, 27]
+    })
+    out = aplicar_catalogo_em_df(exemplo)
+    print(out)
