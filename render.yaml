@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: LICITANDO
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "streamlit run app_turbo.py --server.port=$PORT --server.address=0.0.0.0"
+    pythonVersion: 3.10.8
