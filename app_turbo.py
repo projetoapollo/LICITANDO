@@ -1,217 +1,163 @@
 # app_turbo.py
-import os
-import sys
-import time
+import os, sys
 from io import BytesIO
-
 import streamlit as st
 import pandas as pd
 
 # =========================
-# Configurações / Constantes
+# Configurações gerais
 # =========================
-DEFAULT_FILTRO_MINIMO = 0.70          # 70%
-LOGO_CAMINHO = "static/logo_apolari.png"  # se existir, coloca no topo/Excel
+DEFAULT_FILTRO_MINIMO = 0.70   # 70%
+LOGO_CAMINHO = "static/logo_apolari.png"
 
 st.set_page_config(page_title="Appolari Turbo IA", layout="centered", page_icon="🧠")
 
-# ====== Funções visuais utilitárias ======
+# =========================
+# Observabilidade mínima
+# =========================
+def notify_success(msg: str):
+    st.success(msg)
+
+def notify_error(msg: str, exc: Exception | None = None, step: str | None = None):
+    cab = f"❌ {msg}"
+    if step:
+        cab += f" | etapa: {step}"
+    st.error(cab)
+    if exc is not None:
+        st.exception(exc)
+
+# =========================
+# Barra de progresso simples
+# =========================
+class BarraProgresso:
+    def __init__(self, total_passos: int = 4):
+        self.total = max(1, int(total_passos))
+        self.atual = 0
+        self._bar = st.progress(0, text="Iniciando...")
+
+    def step(self, msg: str):
+        self.atual += 1
+        pct = int((self.atual / self.total) * 100)
+        pct = min(max(pct, 0), 100)
+        # ATUALIZAÇÃO CORRETA (sem .update)
+        self._bar.progress(pct, text=f"{msg} ({pct}%)")
+
+# =========================
+# “Ping” final
+# =========================
 def tocar_ping():
-    """Toca um 'ping' leve quando o processamento terminar."""
     beep_b64 = (
         "UklGRmQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAEQAAABkZGRkZGZmZmZm"
         "ZmdnZ2dnZ2ZmZmZmZGRkZGRkZGRkZGRkZGRkZmdnZ2dnZ2dnZ2ZmZmZmZGRkZGRkZGRkZGRkZGRk"
     )
-    html = f"""
-    <audio autoplay style="display:none">
-      <source src="data:audio/wav;base64,{beep_b64}" type="audio/wav">
-    </audio>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    st.markdown(
+        f"""<audio autoplay style="display:none">
+        <source src="data:audio/wav;base64,{beep_b64}" type="audio/wav">
+        </audio>""",
+        unsafe_allow_html=True,
+    )
 
+# =========================
+# Cabeçalho
+# =========================
+col_logo, col_titulo = st.columns([1, 5])
+with col_titulo:
+    st.title("Sistema Appolari Turbo V3.2")
+    st.success("Aplicação carregada com sucesso! ✅")
 
-def header():
-    left, right = st.columns([1, 5])
-    with left:
-        if os.path.exists(LOGO_CAMINHO):
-            st.image(LOGO_CAMINHO, use_container_width=True)
-    with right:
-        st.title("Sistema Appolari Turbo V3.2")
-        st.success("Aplicação carregada com sucesso! ✅")
+with st.expander("Diagnóstico rápido (pode recolher)"):
+    st.write("Python:", sys.version.split()[0])
+    st.code(
+        {k: os.environ[k] for k in ("PYTHONUNBUFFERED", "STREAMLIT_SERVER_HEADLESS") if k in os.environ},
+        language="json",
+    )
 
+# =========================
+# Imports dos módulos do projeto
+# =========================
+from script_principal_turbo import processar_pdf   # -> DataFrame
+from price_search import buscar_precos             # -> (valores_medios, mercados, fontes)
 
-def diagnostico():
-    with st.expander("Diagnóstico rápido (pode recolher)"):
-        st.write("Python:", sys.version.split()[0])
-        st.code(
-            {k: os.environ[k] for k in ("PYTHONUNBUFFERED", "STREAMLIT_SERVER_HEADLESS") if k in os.environ},
-            language="json",
-        )
-
-
-# ====== Estado de sessão robusto ======
-if "run_id" not in st.session_state:
-    st.session_state.run_id = 0
-if "ultimo_df" not in st.session_state:
-    st.session_state.ultimo_df = None
-if "ultimo_excel" not in st.session_state:
-    st.session_state.ultimo_excel = None
-
-
-# ====== UI principal ======
-header()
-diagnostico()
 st.divider()
 
-uploaded = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"])
+# =========================
+# UI principal
+# =========================
+uploaded_file = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"])
 
-filtro_min = (
-    st.slider(
-        "Filtro mínimo de similaridade (%)",
-        min_value=50,
-        max_value=90,
-        value=int(DEFAULT_FILTRO_MINIMO * 100),
-        help="Itens com score abaixo disso são descartados.",
-    )
-    / 100.0
-)
+filtro_min = st.slider(
+    "Filtro mínimo de similaridade (%)",
+    min_value=50, max_value=90, value=int(DEFAULT_FILTRO_MINIMO * 100),
+    help="Itens com score abaixo disso são descartados na busca de preço."
+) / 100.0
 
-rodar = st.button("▶️ Rodar Sistema Appolari", type="primary")
+btn = st.button("▶️ Rodar Sistema Appolari", type="primary")
 
-if uploaded is not None:
+if uploaded_file is not None:
     st.success("✅ PDF carregado com sucesso!")
 
-# ====== Execução ======
-if rodar:
-    if uploaded is None:
-        st.warning("Envie um PDF antes de rodar.")
-        st.stop()
-
-    # incrementa ID para este run
-    st.session_state.run_id += 1
-    this_run = st.session_state.run_id
-
-    # Lê bytes do arquivo imediatamente (para o buffer não “sumir” num rerun)
+# =========================
+# Botão — pipeline completo
+# =========================
+if btn and uploaded_file is not None:
     try:
-        pdf_bytes = uploaded.getvalue()
-        if not pdf_bytes:
-            st.error("O arquivo PDF veio vazio. Tente reenviar.")
-            st.stop()
-    except Exception as e:
-        st.error("Falha ao ler o PDF.")
-        st.exception(e)
-        st.stop()
+        barra = BarraProgresso(total_passos=4)
 
-    # Painel de status persistente
-    with st.status("Iniciando...", expanded=True) as status:
-        try:
-            status.update(label="Lendo PDF e extraindo itens...", state="running")
-            # Import adiado só na hora de rodar (evita custo em reruns)
-            from script_principal_turbo import processar_pdf
-
-            # Passo o conteúdo em BYTES — seu parser pode receber bytes
-            df = processar_pdf(BytesIO(pdf_bytes))
-            if df is None or df.empty:
-                status.update(
-                    label="Nenhum item encontrado no PDF.",
-                    state="warning",
-                )
-                st.stop()
-
-            # Garante coluna solicitada
-            if "QUANT PESQ (1)" not in df.columns:
-                df["QUANT PESQ (1)"] = 1
-
-            status.update(label="Pesquisando preços e fontes...", state="running")
-            from price_search import buscar_precos
-
-            # ATENÇÃO: a sua função usa o nome do parâmetro 'similaridade_minima'
-            valores_medios, mercados, fontes = buscar_precos(
-                df, similaridade_minima=filtro_min
-            )
-            df["Valor médio do produto"] = valores_medios
-            df["Descrição localidade / Mercado"] = mercados
-            df["Fontes"] = fontes
-            if "Status" not in df.columns:
-                df["Status"] = "OK"
-
-            status.update(label="Gerando planilha Excel...", state="running")
-            output_excel = BytesIO()
-            with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
-                # Tenta inserir logo (se existir)
-                try:
-                    from openpyxl.drawing.image import Image as XLImage
-
-                    ws = writer.book["Cotacao_Final"]
-                    if os.path.exists(LOGO_CAMINHO):
-                        img = XLImage(LOGO_CAMINHO)
-                        ws.add_image(img, "A1")
-                except Exception:
-                    pass
-            output_excel.seek(0)
-
-            # Guarda no estado para reapresentar sem rerodar
-            st.session_state.ultimo_df = df
-            st.session_state.ultimo_excel = output_excel.getvalue()
-
-            status.update(label="Processamento concluído com sucesso!", state="complete")
-            st.success("✅ Pronto!")
-
-        except Exception as e:
-            status.update(label="Falha no processamento.", state="error")
-            st.error("❌ Erro ao processar. Veja os detalhes abaixo:")
-            st.exception(e)
+        # 1) Ler e parsear PDF
+        barra.step("Lendo PDF e extraindo itens...")
+        df = processar_pdf(uploaded_file)
+        if df is None or df.empty:
+            st.warning("Nenhum item encontrado no PDF.")
             st.stop()
 
-    # Renderiza resultados ao fim (mesmo se a página rerender)
-    if st.session_state.ultimo_df is not None:
-        st.dataframe(st.session_state.ultimo_df, use_container_width=True, height=420)
+        # 2) Garantir coluna de quantidade de pesquisa (1)
+        barra.step("Preparando colunas...")
+        if "QUANT PESQ (1)" not in df.columns:
+            df["QUANT PESQ (1)"] = 1
+
+        # 3) Buscar preços (nome do parâmetro CORRETO: similaridade_minima)
+        barra.step("Pesquisando preços e fontes...")
+        valores_medios, mercados, fontes = buscar_precos(
+            df, similaridade_minima=filtro_min
+        )
+        df["Valor médio do produto"] = valores_medios
+        df["Descrição localidade / Mercado"] = mercados
+        df["Fontes"] = fontes
+        if "Status" not in df.columns:
+            df["Status"] = "OK"
+
+        # 4) Gerar Excel com logo
+        barra.step("Gerando planilha Excel...")
+        output_excel = BytesIO()
+        with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
+            # Tenta inserir a logo; se falhar, segue o jogo
+            try:
+                from openpyxl.drawing.image import Image as XLImage
+                ws = writer.book["Cotacao_Final"]
+                if os.path.exists(LOGO_CAMINHO):
+                    ws.add_image(XLImage(LOGO_CAMINHO), "A1")
+            except Exception:
+                pass
+        output_excel.seek(0)
+
+        # Sucesso FINAL (não usar finally para isso)
+        st.dataframe(df, use_container_width=True, height=420)
         st.download_button(
             "📥 Baixar planilha gerada",
-            data=st.session_state.ultimo_excel,
+            data=output_excel,
             file_name="cotacao_final.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        notify_success("Pipeline concluído com sucesso.")
         tocar_ping()
 
-# Se não clicou em rodar mas já tem resultado em memória, mostra
-elif st.session_state.ultimo_df is not None:
-    st.info("Último resultado processado nesta sessão:")
-    st.dataframe(st.session_state.ultimo_df, use_container_width=True, height=420)
-    st.download_button(
-        "📥 Baixar última planilha gerada",
-        data=st.session_state.ultimo_excel,
-        file_name="cotacao_final.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    # topo do arquivo
-from observability import guard, AppError
+    except Exception as e:
+        # AQUI 'e' EXISTE — não dá NameError
+        notify_error("Falha no processamento.", exc=e, step="app")
+        st.stop()
 
-@guard("extrair_itens_pdf")
-def processar_pdf(pdf_stream) -> "pd.DataFrame":
-    # ... SE já existe a função com esse nome, só adicione o @guard acima dela.
-    # Exemplo de validação amigável:
-    import pandas as pd
-    df = _sua_logica_que_cria_df(pdf_stream)  # placeholder
-    if df is None or df.empty:
-        raise AppError("Nenhum item encontrado no PDF.",
-                       hint="Confira se o PDF tem tabela legível.",
-                       code="EMPTY_PDF")
-    # garanta colunas base se desejar
-    return df
-    # topo
-from observability import notify_info, notify_error, notify_success, get_run_id
-
-# logo antes de começar o run, depois de incrementar st.session_state.run_id:
-notify_info(f"Iniciando execução run_id={get_run_id()}")
-
-# quando concluir:
-notify_success("Pipeline concluído com sucesso.")
-
-# em exceções que você já trata (além do st.exception):
-notify_error("Falha no processamento.", exc=e, step="app")
-
-
-
-
+elif btn and uploaded_file is None:
+    st.warning("Envie um PDF antes de rodar.")
+else:
+    st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
