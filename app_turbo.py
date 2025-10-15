@@ -1,102 +1,148 @@
 # app_turbo.py
 import os
 import sys
+import time
 from io import BytesIO
+
 import streamlit as st
 import pandas as pd
 
-# ---------------- Config ----------------
-DEFAULT_FILTRO_MINIMO = 0.70   # 70%
-LOGO_CAMINHO = "static/logo_apolari.png"  # se existir, vai no Excel
+# =========================
+# Configurações / Constantes
+# =========================
+DEFAULT_FILTRO_MINIMO = 0.70          # 70%
+LOGO_CAMINHO = "static/logo_apolari.png"  # se existir, coloca no topo/Excel
 
 st.set_page_config(page_title="Appolari Turbo IA", layout="centered", page_icon="🧠")
 
-# ---------------- Cabeçalho ----------------
-col_logo, col_titulo = st.columns([1, 5])
-with col_logo:
-    if os.path.exists(LOGO_CAMINHO):
-        st.image(LOGO_CAMINHO, use_container_width=True)
-with col_titulo:
-    st.title("Sistema Appolari Turbo V3.2")
-    st.success("Aplicação carregada com sucesso! ✅")
-
-with st.expander("Diagnóstico rápido (pode recolher)"):
-    st.write("Python:", sys.version.split()[0])
-    st.code(
-        {k: os.environ[k] for k in ("PYTHONUNBUFFERED", "STREAMLIT_SERVER_HEADLESS") if k in os.environ},
-        language="json",
+# ====== Funções visuais utilitárias ======
+def tocar_ping():
+    """Toca um 'ping' leve quando o processamento terminar."""
+    beep_b64 = (
+        "UklGRmQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAEQAAABkZGRkZGZmZmZm"
+        "ZmdnZ2dnZ2ZmZmZmZGRkZGRkZGRkZGRkZGRkZmdnZ2dnZ2dnZ2ZmZmZmZGRkZGRkZGRkZGRkZGRk"
     )
+    html = f"""
+    <audio autoplay style="display:none">
+      <source src="data:audio/wav;base64,{beep_b64}" type="audio/wav">
+    </audio>
+    """
+    st.markdown(html, unsafe_allow_html=True)
 
-# ---------------- Módulos do projeto ----------------
-from script_principal_turbo import processar_pdf   # retorna DataFrame base
-from price_search import buscar_precos             # retorna (valores_medios, mercados, fontes)
 
+def header():
+    left, right = st.columns([1, 5])
+    with left:
+        if os.path.exists(LOGO_CAMINHO):
+            st.image(LOGO_CAMINHO, use_container_width=True)
+    with right:
+        st.title("Sistema Appolari Turbo V3.2")
+        st.success("Aplicação carregada com sucesso! ✅")
+
+
+def diagnostico():
+    with st.expander("Diagnóstico rápido (pode recolher)"):
+        st.write("Python:", sys.version.split()[0])
+        st.code(
+            {k: os.environ[k] for k in ("PYTHONUNBUFFERED", "STREAMLIT_SERVER_HEADLESS") if k in os.environ},
+            language="json",
+        )
+
+
+# ====== Estado de sessão robusto ======
+if "run_id" not in st.session_state:
+    st.session_state.run_id = 0
+if "ultimo_df" not in st.session_state:
+    st.session_state.ultimo_df = None
+if "ultimo_excel" not in st.session_state:
+    st.session_state.ultimo_excel = None
+
+
+# ====== UI principal ======
+header()
+diagnostico()
 st.divider()
 
-# ---------------- UI principal ----------------
-uploaded_file = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"], key="pdf_upload")
+uploaded = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"])
 
-filtro_min = st.slider(
-    "Filtro mínimo de similaridade (%)",
-    min_value=50, max_value=90, value=int(DEFAULT_FILTRO_MINIMO * 100),
-    help="Itens com score abaixo disso são descartados na busca de preço.",
-) / 100.0
+filtro_min = (
+    st.slider(
+        "Filtro mínimo de similaridade (%)",
+        min_value=50,
+        max_value=90,
+        value=int(DEFAULT_FILTRO_MINIMO * 100),
+        help="Itens com score abaixo disso são descartados.",
+    )
+    / 100.0
+)
 
-btn = st.button("▶️ Rodar Sistema Appolari", type="primary")
+rodar = st.button("▶️ Rodar Sistema Appolari", type="primary")
 
-if uploaded_file is not None:
+if uploaded is not None:
     st.success("✅ PDF carregado com sucesso!")
 
-# Placeholders estáveis (evita removeChild)
-ph_status = st.empty()
-ph_progress = st.empty()
-ph_table = st.empty()
-ph_download = st.empty()
+# ====== Execução ======
+if rodar:
+    if uploaded is None:
+        st.warning("Envie um PDF antes de rodar.")
+        st.stop()
 
-def set_progress(step: int, total: int, label: str):
-    pct = int(max(0, min(100, (step / total) * 100)))
-    # usamos sempre o mesmo placeholder
-    ph_progress.progress(pct, text=f"{label} ({pct}%)")
+    # incrementa ID para este run
+    st.session_state.run_id += 1
+    this_run = st.session_state.run_id
 
-if btn and uploaded_file is not None:
-    TOTAL = 4
+    # Lê bytes do arquivo imediatamente (para o buffer não “sumir” num rerun)
     try:
-        with st.status("Iniciando…", state="running") as status:
-            # 1) Ler/parsear PDF
-            set_progress(1, TOTAL, "Lendo PDF e extraindo itens")
-            status.write("📄 Etapa 1/4 — lendo PDF…")
-            df = processar_pdf(uploaded_file)
+        pdf_bytes = uploaded.getvalue()
+        if not pdf_bytes:
+            st.error("O arquivo PDF veio vazio. Tente reenviar.")
+            st.stop()
+    except Exception as e:
+        st.error("Falha ao ler o PDF.")
+        st.exception(e)
+        st.stop()
 
+    # Painel de status persistente
+    with st.status("Iniciando...", expanded=True) as status:
+        try:
+            status.update(label="Lendo PDF e extraindo itens...", state="running")
+            # Import adiado só na hora de rodar (evita custo em reruns)
+            from script_principal_turbo import processar_pdf
+
+            # Passo o conteúdo em BYTES — seu parser pode receber bytes
+            df = processar_pdf(BytesIO(pdf_bytes))
             if df is None or df.empty:
-                ph_progress.progress(25, text="Lendo PDF e extraindo itens (25%)")
-                st.warning("Nenhum item encontrado no PDF.")
-                status.update(label="Processo encerrado", state="error")
+                status.update(
+                    label="Nenhum item encontrado no PDF.",
+                    state="warning",
+                )
                 st.stop()
 
-            # 2) Garantir coluna QUANT PESQ (1)
-            set_progress(2, TOTAL, "Preparando colunas")
-            status.write("🧰 Etapa 2/4 — preparando colunas…")
+            # Garante coluna solicitada
             if "QUANT PESQ (1)" not in df.columns:
                 df["QUANT PESQ (1)"] = 1
 
-            # 3) Buscar preços e fontes
-            set_progress(3, TOTAL, "Pesquisando preços e fontes")
-            status.write("🔎 Etapa 3/4 — pesquisando preços…")
-            valores_medios, mercados, fontes = buscar_precos(df, min_score=filtro_min)
+            status.update(label="Pesquisando preços e fontes...", state="running")
+            from price_search import buscar_precos
+
+            # ATENÇÃO: a sua função usa o nome do parâmetro 'similaridade_minima'
+            valores_medios, mercados, fontes = buscar_precos(
+                df, similaridade_minima=filtro_min
+            )
             df["Valor médio do produto"] = valores_medios
             df["Descrição localidade / Mercado"] = mercados
             df["Fontes"] = fontes
             if "Status" not in df.columns:
                 df["Status"] = "OK"
 
-            # 4) Gerar Excel
-            set_progress(4, TOTAL, "Gerando planilha Excel")
-            status.write("📦 Etapa 4/4 — gerando Excel…")
+            status.update(label="Gerando planilha Excel...", state="running")
             output_excel = BytesIO()
             with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
+                # Tenta inserir logo (se existir)
                 try:
                     from openpyxl.drawing.image import Image as XLImage
+
                     ws = writer.book["Cotacao_Final"]
                     if os.path.exists(LOGO_CAMINHO):
                         img = XLImage(LOGO_CAMINHO)
@@ -105,20 +151,37 @@ if btn and uploaded_file is not None:
                     pass
             output_excel.seek(0)
 
-            # Mostrar resultado
-            ph_table.dataframe(df, use_container_width=True, height=420)
-            ph_download.download_button(
-                "📥 Baixar planilha gerada",
-                data=output_excel,
-                file_name="cotacao_final.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            # Guarda no estado para reapresentar sem rerodar
+            st.session_state.ultimo_df = df
+            st.session_state.ultimo_excel = output_excel.getvalue()
 
-            status.update(label="✅ Processamento concluído!", state="complete")
+            status.update(label="Processamento concluído com sucesso!", state="complete")
+            st.success("✅ Pronto!")
 
-    except Exception as e:
-        # não removemos nada do DOM; só atualizamos conteúdo
-        st.error("❌ Erro ao processar.")
-        st.exception(e)
-elif btn and uploaded_file is None:
-    st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
+        except Exception as e:
+            status.update(label="Falha no processamento.", state="error")
+            st.error("❌ Erro ao processar. Veja os detalhes abaixo:")
+            st.exception(e)
+            st.stop()
+
+    # Renderiza resultados ao fim (mesmo se a página rerender)
+    if st.session_state.ultimo_df is not None:
+        st.dataframe(st.session_state.ultimo_df, use_container_width=True, height=420)
+        st.download_button(
+            "📥 Baixar planilha gerada",
+            data=st.session_state.ultimo_excel,
+            file_name="cotacao_final.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        tocar_ping()
+
+# Se não clicou em rodar mas já tem resultado em memória, mostra
+elif st.session_state.ultimo_df is not None:
+    st.info("Último resultado processado nesta sessão:")
+    st.dataframe(st.session_state.ultimo_df, use_container_width=True, height=420)
+    st.download_button(
+        "📥 Baixar última planilha gerada",
+        data=st.session_state.ultimo_excel,
+        file_name="cotacao_final.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
