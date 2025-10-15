@@ -185,3 +185,20 @@ elif st.session_state.ultimo_df is not None:
         file_name="cotacao_final.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    # topo do arquivo
+from observability import guard, AppError
+
+@guard("extrair_itens_pdf")
+def processar_pdf(pdf_stream) -> "pd.DataFrame":
+    # ... SE já existe a função com esse nome, só adicione o @guard acima dela.
+    # Exemplo de validação amigável:
+    import pandas as pd
+    df = _sua_logica_que_cria_df(pdf_stream)  # placeholder
+    if df is None or df.empty:
+        raise AppError("Nenhum item encontrado no PDF.",
+                       hint="Confira se o PDF tem tabela legível.",
+                       code="EMPTY_PDF")
+    # garanta colunas base se desejar
+    return df
+
+
