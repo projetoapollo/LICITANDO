@@ -1,12 +1,12 @@
 # app_turbo.py
-import os, sys, io, base64, time
+import os, sys
+from io import BytesIO
 import streamlit as st
 import pandas as pd
-from io import BytesIO
 
 # ===== Config =====
 DEFAULT_FILTRO_MINIMO = 0.70   # 70%
-LOGO_CAMINHO = "static/logo_apolari.png"  # coloque sua logo aqui (ver passo 'CRIAÇÃO NOVA')
+LOGO_CAMINHO = "static/logo_apolari.png"  # troque se usar outro caminho
 
 # ===== Helpers visuais =====
 def tocar_ping():
@@ -22,15 +22,18 @@ def tocar_ping():
     """
     st.markdown(html, unsafe_allow_html=True)
 
+# ---- Barra de progresso simples (sem .update()) ----
 class BarraProgresso:
-    def __init__(self, total_etapas:int = 4):
-        self._p = st.progress(0, text="Iniciando…")
-        self.total = total_etapas
+    def __init__(self, total_passos: int = 4):
+        self.total = max(1, int(total_passos))
         self.atual = 0
-    def step(self, msg:str):
+        self._bar = st.progress(0, text="Iniciando...")
+
+    def step(self, msg: str):
         self.atual += 1
         pct = int((self.atual / self.total) * 100)
-        self._p.update(pct, text=f"{msg} ({pct}%)")
+        pct = min(max(pct, 0), 100)  # garante 0..100
+        self._bar.progress(pct, text=f"{msg} ({pct}%)")
 
 # ===== Layout inicial =====
 st.set_page_config(page_title="Appolari Turbo IA", layout="centered", page_icon="🧠")
@@ -72,22 +75,28 @@ if uploaded_file is not None:
     st.success("✅ PDF carregado com sucesso!")
 
 if btn and uploaded_file is not None:
-    barra = BarraProgresso(total_etapas=4)
+    barra = BarraProgresso(total_passos=4)
     try:
         # 1) Ler/parsear PDF
-        barra.step("Lendo PDF e extraíndo itens…")
+        barra.step("Lendo PDF e extraindo itens...")
         df = processar_pdf(uploaded_file)
         if df is None or df.empty:
             st.warning("Nenhum item encontrado no PDF.")
             st.stop()
 
         # 2) Garantir coluna QUANT PESQ (1) = 1
-        barra.step("Preparando colunas…")
+        barra.step("Preparando colunas...")
         if "QUANT PESQ (1)" not in df.columns:
             df["QUANT PESQ (1)"] = 1
+        else:
+            # força 1 para manter a lógica de cotação unitária
+            try:
+                df["QUANT PESQ (1)"] = 1
+            except Exception:
+                df["QUANT PESQ (1)"] = 1
 
         # 3) Buscar preços (com filtro de similaridade)
-        barra.step("Pesquisando preços e fontes…")
+        barra.step("Pesquisando preços e fontes...")
         valores_medios, mercados, fontes = buscar_precos(df, min_score=filtro_min)
         df["Valor médio do produto"] = valores_medios
         df["Descrição localidade / Mercado"] = mercados
@@ -96,10 +105,11 @@ if btn and uploaded_file is not None:
             df["Status"] = "OK"
 
         # 4) Gerar Excel com logo
-        barra.step("Gerando planilha Excel…")
+        barra.step("Gerando planilha Excel...")
         output_excel = BytesIO()
         with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
+            # tenta inserir a logo no Excel
             try:
                 from openpyxl.drawing.image import Image as XLImage
                 ws = writer.book["Cotacao_Final"]
@@ -114,7 +124,7 @@ if btn and uploaded_file is not None:
         st.dataframe(df, use_container_width=True, height=420)
         st.download_button(
             "📥 Baixar planilha gerada",
-            data=output_excel,
+            data=output_excel.getvalue(),
             file_name="cotacao_final.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
