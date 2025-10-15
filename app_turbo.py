@@ -200,5 +200,18 @@ def processar_pdf(pdf_stream) -> "pd.DataFrame":
                        code="EMPTY_PDF")
     # garanta colunas base se desejar
     return df
+    # topo
+from observability import notify_info, notify_error, notify_success, get_run_id
+
+# logo antes de começar o run, depois de incrementar st.session_state.run_id:
+notify_info(f"Iniciando execução run_id={get_run_id()}")
+
+# quando concluir:
+notify_success("Pipeline concluído com sucesso.")
+
+# em exceções que você já trata (além do st.exception):
+notify_error("Falha no processamento.", exc=e, step="app")
+
+
 
 
