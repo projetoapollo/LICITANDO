@@ -1,130 +1,188 @@
 # price_search.py
-# -------------------------------------------------------------------
-# Busca preços para os itens do DF do parser:
-#  - Se o código existir no catálogo, usa apenas esses matches.
-#  - Senão, calcula similaridade por descrição e aplica min_score.
-# Retorna 3 listas com o mesmo comprimento de df:
-#  [valores_medios], [mercados_concat], [fontes_concat]
-# -------------------------------------------------------------------
-
 from __future__ import annotations
+
 import os
-import unicodedata
-import difflib
+import math
+import re
+from typing import List, Tuple
+
 import pandas as pd
-from typing import Tuple, List
 
-# Caminho padrão do catálogo “manual”
-CATALOGO_PATH = os.path.join("data", "catalogo_precos.csv")
+# ---------------------------------------------------------
+# Tentativa de importar o decorator de observabilidade
+# (se não existir, criamos um no-op para não quebrar)
+# ---------------------------------------------------------
+try:
+    from observability import guard  # opcional
+except Exception:
+    def guard(_name: str):
+        def _decorator(fn):
+            return fn
+        return _decorator
 
-def _normalize_txt(s: str) -> str:
-    """Remove acentos, pontuação solta e normaliza espaços."""
-    if not isinstance(s, str):
+
+CATALOGO_PATH = "data/catalogo_precos.csv"
+
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
+_SPACES = re.compile(r"\s+")
+_PUNCTS = re.compile(r"[^\w\s]", flags=re.UNICODE)
+
+def _norm_txt(txt: str) -> str:
+    if not isinstance(txt, str):
         return ""
-    s = s.lower()
-    s = "".join(
-        c for c in unicodedata.normalize("NFD", s)
-        if unicodedata.category(c) != "Mn"
-    )
-    # troca pontuações comuns por espaço e compacta
-    for ch in [",", ";", ".", "–", "—", "-", "/", "\\", "(", ")", "[", "]"]:
-        s = s.replace(ch, " ")
-    s = " ".join(s.split())
-    return s
+    txt = txt.lower()
+    txt = _PUNCTS.sub(" ", txt)
+    txt = _SPACES.sub(" ", txt).strip()
+    return txt
 
-def _carregar_catalogo(caminho: str = CATALOGO_PATH) -> pd.DataFrame:
+def _token_set_overlap(a: str, b: str) -> float:
     """
-    Carrega o catálogo CSV com colunas esperadas:
-    descricao, unidade, preco, mercado, fonte, codigo (opcional)
+    Similaridade simples por interseção de tokens.
+    Retorna 0..1.
     """
-    if not os.path.exists(caminho):
-        # catálogo ausente: devolve DF vazio com colunas padrão
-        return pd.DataFrame(columns=["descricao","unidade","preco","mercado","fonte","codigo"])
+    if not a or not b:
+        return 0.0
+    sa = set(_norm_txt(a).split())
+    sb = set(_norm_txt(b).split())
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    uni = len(sa | sb)
+    return inter / uni if uni else 0.0
 
-    dfc = pd.read_csv(caminho, sep=",", encoding="utf-8", keep_default_na=False)
+
+def _carregar_catalogo(path: str = CATALOGO_PATH) -> pd.DataFrame:
+    """
+    Lê o catálogo de preços local (CSV).
+    Espera colunas:
+      descricao, unidade, preco, mercado, fonte, codigo
+    Qualquer ausência é tratada com preenchimento vazio.
+    """
+    if not os.path.exists(path):
+        # catálogo vazio
+        return pd.DataFrame(
+            columns=["descricao", "unidade", "preco", "mercado", "fonte", "codigo"]
+        )
+
+    df = pd.read_csv(path, encoding="utf-8")
     # Garante colunas
-    for col in ["descricao","unidade","preco","mercado","fonte","codigo"]:
-        if col not in dfc.columns:
-            dfc[col] = ""
-    # Normalizações úteis
-    dfc["__desc_norm"] = dfc["descricao"].apply(_normalize_txt)
-    dfc["__codigo_norm"] = (
-        dfc.get("codigo", "").astype(str)
-        .str.replace(r"[.\s]", "", regex=True)
-    )
-    # preco numérico
-    dfc["preco"] = pd.to_numeric(dfc["preco"], errors="coerce")
-    return dfc
+    for col in ["descricao", "unidade", "preco", "mercado", "fonte", "codigo"]:
+        if col not in df.columns:
+            df[col] = ""
 
-def _similaridade(a: str, b: str) -> float:
-    """0..1 usando SequenceMatcher (rápido e sem dependências)."""
-    return difflib.SequenceMatcher(None, a, b).ratio()
+    # Normaliza tipos
+    df["descricao"] = df["descricao"].astype(str)
+    df["unidade"] = df["unidade"].astype(str)
+    df["mercado"] = df["mercado"].astype(str)
+    df["fonte"] = df["fonte"].astype(str)
+    df["codigo"] = df["codigo"].astype(str)
+    # preço numérico
+    def _to_float(x):
+        try:
+            return float(str(x).replace(",", "."))
+        except Exception:
+            return math.nan
+    df["preco"] = df["preco"].map(_to_float)
 
-def buscar_precos(df: pd.DataFrame, min_score: float = 0.70) -> Tuple[List[float], List[str], List[str]]:
+    return df
+
+
+# ---------------------------------------------------------
+# Função principal
+# ---------------------------------------------------------
+@guard("buscar_precos")
+def buscar_precos(
+    df_itens: pd.DataFrame,
+    similaridade_minima: float = 0.70,
+) -> Tuple[List[float], List[str], List[str]]:
     """
-    df: precisa ter colunas:
-        'Código PDF', 'Descrição resumida PDF', 'Unidade' (opcional), 'Quantidade' (opcional)
-    min_score: similaridade mínima (0..1) quando comparando por descrição.
+    Recebe o DF base (já extraído do PDF) e retorna 3 listas:
+      - valores_medios
+      - mercados (descrição/localidade)
+      - fontes  (URL ou nome da fonte)
+
+    Regras de matching:
+      1) Se houver coluna 'Código PDF', tenta casar por código (catalogo.codigo).
+      2) Caso contrário, ou não encontre por código, casa por similaridade
+         de tokens entre 'Descrição resumida PDF' e 'catalogo.descricao'
+         (limiar = similaridade_minima, 0..1).
+      3) Se não achar nada, retorna NaN / vazio.
+
+    Observação: esta é uma heurística simples para rodar bem no Render Free.
     """
-    cat = _carregar_catalogo()
+    catalogo = _carregar_catalogo(CATALOGO_PATH)
 
-    valores: List[float] = []
-    mercados: List[str] = []
-    fontes: List[str] = []
+    n = len(df_itens)
+    valores: List[float] = [math.nan] * n
+    mercados: List[str] = [""] * n
+    fontes: List[str] = [""] * n
 
-    if cat.empty:
-        # Sem catálogo: devolve placeholders
-        n = len(df)
-        return [None]*n, [""]*n, [""]*n
+    if catalogo.empty or df_itens is None or df_itens.empty:
+        return valores, mercados, fontes
 
-    for _, row in df.iterrows():
-        cod = str(row.get("Código PDF", "")).strip()
-        cod_norm = "".join(ch for ch in cod if ch.isdigit())
-        desc = str(row.get("Descrição resumida PDF", ""))
-        desc_norm = _normalize_txt(desc)
+    # Acelera com colunas normalizadas
+    catalogo["_desc_norm"] = catalogo["descricao"].map(_norm_txt)
+    catalogo["_codigo_norm"] = catalogo["codigo"].astype(str).str.strip()
 
-        # 1) Tenta por código (exato no catálogo, desconsiderando pontos/espaços)
-        subset = cat[cat["__codigo_norm"] == cod_norm] if cod_norm else pd.DataFrame()
-        if subset.empty:
-            # 2) Fallback: similaridade por descrição
-            cat["__score"] = cat["__desc_norm"].apply(lambda t: _similaridade(desc_norm, t))
-            subset = cat[cat["__score"] >= float(min_score)]
+    tem_codigo = "Código PDF" in df_itens.columns
+    tem_desc = "Descrição resumida PDF" in df_itens.columns
 
-        if subset.empty or subset["preco"].dropna().empty:
-            valores.append(None)
-            mercados.append("")
-            fontes.append("")
-            continue
+    for idx, row in df_itens.reset_index(drop=True).iterrows():
+        melhor_preco = math.nan
+        melhor_mercado = ""
+        melhor_fonte = ""
 
-        # média de preços
-        media = subset["preco"].dropna().mean()
+        achou = False
 
-        # concatena mercados e fontes (sem duplicar demais)
-        mercados_join = ", ".join(subset["mercado"].astype(str).head(3).tolist())
-        fontes_join = ", ".join(subset["fonte"].astype(str).head(3).tolist())
+        # 1) tentativa por código
+        if tem_codigo:
+            cod = str(row["Código PDF"]).strip()
+            if cod:
+                subset = catalogo[catalogo["_codigo_norm"] == cod]
+                if not subset.empty:
+                    # pegue a primeira linha (ou média)
+                    # aqui, vamos de média dos preços daquele código
+                    preco = subset["preco"].mean(skipna=True)
+                    if not math.isnan(preco):
+                        melhor_preco = float(preco)
+                        # agrega mercados/fontes de todos encontrados
+                        melhor_mercado = "; ".join(
+                            subset["mercado"].dropna().astype(str).unique().tolist()
+                        )
+                        melhor_fonte = "; ".join(
+                            subset["fonte"].dropna().astype(str).unique().tolist()
+                        )
+                        achou = True
 
-        valores.append(round(float(media), 2))
-        mercados.append(mercados_join)
-        fontes.append(fontes_join)
+        # 2) tentativa por similaridade de descrição
+        if not achou and tem_desc:
+            desc = str(row["Descrição resumida PDF"])
+            desc_norm = _norm_txt(desc)
+            if desc_norm:
+                # computa similaridade e filtra
+                catalogo["__sim"] = catalogo["_desc_norm"].map(
+                    lambda d: _token_set_overlap(d, desc_norm)
+                )
+                subset = catalogo[catalogo["__sim"] >= float(similaridade_minima)]
+                if not subset.empty:
+                    # escolhe o melhor por maior similaridade
+                    best = subset.sort_values("__sim", ascending=False).head(1)
+                    preco = best["preco"].iloc[0]
+                    if not math.isnan(preco):
+                        melhor_preco = float(preco)
+                        melhor_mercado = str(best["mercado"].iloc[0])
+                        melhor_fonte = str(best["fonte"].iloc[0])
+                        achou = True
+
+        # Preenche resultados deste item
+        valores[idx] = melhor_preco
+        mercados[idx] = melhor_mercado
+        fontes[idx] = melhor_fonte
+
+    # Remove coluna temporária se tiver sido criada
+    if "__sim" in catalogo.columns:
+        catalogo.drop(columns=["__sim"], inplace=True)
 
     return valores, mercados, fontes
-    from observability import guard, AppError
-import pandas as pd
-
-@guard("buscar_precos")
-def buscar_precos(df: "pd.DataFrame", *, similaridade_minima: float = 0.70):
-    # Exemplo de validações:
-    if "Descrição resumida PDF" not in df.columns:
-        raise AppError("Coluna 'Descrição resumida PDF' ausente no DataFrame.",
-                       code="COLUNA_FALTANDO",
-                       hint="Confirme a etapa de extração/normalização.")
-    if not (0.0 <= similaridade_minima <= 1.0):
-        raise AppError("Parâmetro 'similaridade_minima' inválido.",
-                       code="PARAM_INVALIDO",
-                       hint="Use valor entre 0.0 e 1.0 (ex.: 0.7).")
-
-    # ... Sua lógica atual de pesquisa (catálogo + fontes externas)
-    # Deve retornar 3 listas/Series: valores_medios, mercados, fontes
-    return valores_medios, mercados, fontes
-
-
