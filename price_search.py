@@ -108,3 +108,23 @@ def buscar_precos(df: pd.DataFrame, min_score: float = 0.70) -> Tuple[List[float
         fontes.append(fontes_join)
 
     return valores, mercados, fontes
+    from observability import guard, AppError
+import pandas as pd
+
+@guard("buscar_precos")
+def buscar_precos(df: "pd.DataFrame", *, similaridade_minima: float = 0.70):
+    # Exemplo de validações:
+    if "Descrição resumida PDF" not in df.columns:
+        raise AppError("Coluna 'Descrição resumida PDF' ausente no DataFrame.",
+                       code="COLUNA_FALTANDO",
+                       hint="Confirme a etapa de extração/normalização.")
+    if not (0.0 <= similaridade_minima <= 1.0):
+        raise AppError("Parâmetro 'similaridade_minima' inválido.",
+                       code="PARAM_INVALIDO",
+                       hint="Use valor entre 0.0 e 1.0 (ex.: 0.7).")
+
+    # ... Sua lógica atual de pesquisa (catálogo + fontes externas)
+    # Deve retornar 3 listas/Series: valores_medios, mercados, fontes
+    return valores_medios, mercados, fontes
+
+
