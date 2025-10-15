@@ -5,48 +5,17 @@ from io import BytesIO
 import streamlit as st
 import pandas as pd
 
-# ========= CONFIG =========
-DEFAULT_FILTRO_MINIMO = 0.70  # 70%
-LOGO_CAMINHO = "static/logo_apolari.png"  # coloque sua logo aqui
+# ---------------- Config ----------------
+DEFAULT_FILTRO_MINIMO = 0.70   # 70%
+LOGO_CAMINHO = "static/logo_apolari.png"  # se existir, vai no Excel
 
-# ========= AJUDANTES VISUAIS =========
-def tocar_ping() -> None:
-    """Toca um 'ping' leve quando o processamento terminar."""
-    beep_b64 = (
-        "UklGRmQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAEQAAABkZGRkZGZmZmZm"
-        "ZmdnZ2dnZ2ZmZmZmZGRkZGRkZGRkZGRkZGRkZmdnZ2dnZ2dnZ2ZmZmZmZGRkZGRkZGRkZGRkZGRk"
-    )
-    html = f"""
-    <audio autoplay style="display:none">
-      <source src="data:audio/wav;base64,{beep_b64}" type="audio/wav">
-    </audio>
-    """
-    st.markdown(html, unsafe_allow_html=True)
-
-
-# ---- Barra de progresso simples ----
-class BarraProgresso:
-    def __init__(self, total_passos: int = 4):
-        self.total = max(1, int(total_passos))
-        self.atual = 0
-        self._bar = st.progress(0, text="Iniciando...")
-
-    def step(self, msg: str):
-        self.atual += 1
-        pct = int((self.atual / self.total) * 100)
-        pct = min(max(pct, 0), 100)
-        # ATUALIZAÇÃO correta na Streamlit 1.37: use .progress() (não .update())
-        self._bar.progress(pct, text=f"{msg} ({pct}%)")
-
-
-# ========= LAYOUT INICIAL =========
 st.set_page_config(page_title="Appolari Turbo IA", layout="centered", page_icon="🧠")
 
+# ---------------- Cabeçalho ----------------
 col_logo, col_titulo = st.columns([1, 5])
 with col_logo:
     if os.path.exists(LOGO_CAMINHO):
         st.image(LOGO_CAMINHO, use_container_width=True)
-
 with col_titulo:
     st.title("Sistema Appolari Turbo V3.2")
     st.success("Aplicação carregada com sucesso! ✅")
@@ -58,105 +27,98 @@ with st.expander("Diagnóstico rápido (pode recolher)"):
         language="json",
     )
 
-# ========= IMPORTS DOS MÓDULOS DO PROJETO =========
-from script_principal_turbo import processar_pdf      # retorna DataFrame base
-from price_search import buscar_precos                # retorna (valores_medios, mercados, fontes)
+# ---------------- Módulos do projeto ----------------
+from script_principal_turbo import processar_pdf   # retorna DataFrame base
+from price_search import buscar_precos             # retorna (valores_medios, mercados, fontes)
 
 st.divider()
 
-# ========= INTERFACE PRINCIPAL =========
-uploaded_file = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"])
+# ---------------- UI principal ----------------
+uploaded_file = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"], key="pdf_upload")
 
-# Slider do filtro de similaridade (50% a 90%, padrão 70%)
-filtro_min = (
-    st.slider(
-        "Filtro mínimo de similaridade (%)",
-        min_value=50,
-        max_value=90,
-        value=int(DEFAULT_FILTRO_MINIMO * 100),
-        help="Itens com score abaixo disso são descartados na busca de preço.",
-    )
-    / 100.0
-)
+filtro_min = st.slider(
+    "Filtro mínimo de similaridade (%)",
+    min_value=50, max_value=90, value=int(DEFAULT_FILTRO_MINIMO * 100),
+    help="Itens com score abaixo disso são descartados na busca de preço.",
+) / 100.0
 
 btn = st.button("▶️ Rodar Sistema Appolari", type="primary")
 
 if uploaded_file is not None:
     st.success("✅ PDF carregado com sucesso!")
 
+# Placeholders estáveis (evita removeChild)
+ph_status = st.empty()
+ph_progress = st.empty()
+ph_table = st.empty()
+ph_download = st.empty()
+
+def set_progress(step: int, total: int, label: str):
+    pct = int(max(0, min(100, (step / total) * 100)))
+    # usamos sempre o mesmo placeholder
+    ph_progress.progress(pct, text=f"{label} ({pct}%)")
+
 if btn and uploaded_file is not None:
-    barra = BarraProgresso(total_passos=4)
-
+    TOTAL = 4
     try:
-        # ===== 1) LER / PARSEAR PDF =====
-        barra.step("Lendo PDF e extraindo itens...")
-        # Pega os bytes e garante um buffer "zerado"
-        file_bytes = uploaded_file.getvalue()
-        df = processar_pdf(BytesIO(file_bytes))
+        with st.status("Iniciando…", state="running") as status:
+            # 1) Ler/parsear PDF
+            set_progress(1, TOTAL, "Lendo PDF e extraindo itens")
+            status.write("📄 Etapa 1/4 — lendo PDF…")
+            df = processar_pdf(uploaded_file)
 
-        # Se por algum motivo vier vazio, tenta novamente
-        if df is None or df.empty:
-            try:
-                uploaded_file.seek(0)
-            except Exception:
-                pass
-            df = processar_pdf(BytesIO(file_bytes))
+            if df is None or df.empty:
+                ph_progress.progress(25, text="Lendo PDF e extraindo itens (25%)")
+                st.warning("Nenhum item encontrado no PDF.")
+                status.update(label="Processo encerrado", state="error")
+                st.stop()
 
-        if df is None or df.empty:
-            st.warning("Nenhum item encontrado no PDF.")
-            st.stop()
+            # 2) Garantir coluna QUANT PESQ (1)
+            set_progress(2, TOTAL, "Preparando colunas")
+            status.write("🧰 Etapa 2/4 — preparando colunas…")
+            if "QUANT PESQ (1)" not in df.columns:
+                df["QUANT PESQ (1)"] = 1
 
-        # ===== 2) GARANTIR COLUNAS =====
-        barra.step("Preparando colunas…")
-        # QUANT PESQ (1) sempre = 1, para pesquisa de preço unitário
-        if "QUANT PESQ (1)" not in df.columns:
-            df["QUANT PESQ (1)"] = 1
+            # 3) Buscar preços e fontes
+            set_progress(3, TOTAL, "Pesquisando preços e fontes")
+            status.write("🔎 Etapa 3/4 — pesquisando preços…")
+            valores_medios, mercados, fontes = buscar_precos(df, min_score=filtro_min)
+            df["Valor médio do produto"] = valores_medios
+            df["Descrição localidade / Mercado"] = mercados
+            df["Fontes"] = fontes
+            if "Status" not in df.columns:
+                df["Status"] = "OK"
 
-        # Status default
-        if "Status" not in df.columns:
-            df["Status"] = "OK"
+            # 4) Gerar Excel
+            set_progress(4, TOTAL, "Gerando planilha Excel")
+            status.write("📦 Etapa 4/4 — gerando Excel…")
+            output_excel = BytesIO()
+            with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
+                try:
+                    from openpyxl.drawing.image import Image as XLImage
+                    ws = writer.book["Cotacao_Final"]
+                    if os.path.exists(LOGO_CAMINHO):
+                        img = XLImage(LOGO_CAMINHO)
+                        ws.add_image(img, "A1")
+                except Exception:
+                    pass
+            output_excel.seek(0)
 
-        # ===== 3) BUSCAR PREÇOS =====
-        barra.step("Pesquisando preços e fontes…")
-        valores_medios, mercados, fontes = buscar_precos(df, min_score=filtro_min)
-        df["Valor médio do produto"] = valores_medios
-        df["Descrição localidade / Mercado"] = mercados
-        df["Fontes"] = fontes
+            # Mostrar resultado
+            ph_table.dataframe(df, use_container_width=True, height=420)
+            ph_download.download_button(
+                "📥 Baixar planilha gerada",
+                data=output_excel,
+                file_name="cotacao_final.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
-        # ===== 4) GERAR EXCEL =====
-        barra.step("Gerando planilha Excel…")
-        output_excel = BytesIO()
-        with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
-
-            # tenta inserir a logo na planilha
-            try:
-                from openpyxl.drawing.image import Image as XLImage
-
-                ws = writer.book["Cotacao_Final"]
-                if os.path.exists(LOGO_CAMINHO):
-                    img = XLImage(LOGO_CAMINHO)
-                    ws.add_image(img, "A1")
-            except Exception:
-                # se não conseguir, segue sem a imagem
-                pass
-
-        output_excel.seek(0)
-
-        st.success("✅ Processamento concluído com sucesso!")
-        st.dataframe(df, use_container_width=True, height=420)
-
-        st.download_button(
-            "📥 Baixar planilha gerada",
-            data=output_excel,
-            file_name="cotacao_final.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-        tocar_ping()
+            status.update(label="✅ Processamento concluído!", state="complete")
 
     except Exception as e:
+        # não removemos nada do DOM; só atualizamos conteúdo
         st.error("❌ Erro ao processar.")
         st.exception(e)
-else:
+elif btn and uploaded_file is None:
     st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
