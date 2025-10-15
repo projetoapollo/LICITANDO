@@ -186,3 +186,64 @@ def buscar_precos(
         catalogo.drop(columns=["__sim"], inplace=True)
 
     return valores, mercados, fontes
+    # price_search.py
+import pandas as pd
+
+def buscar_precos(df: pd.DataFrame, similaridade_minima: float = 0.7):
+    """
+    Recebe o DF base (itens do PDF) e retorna 3 listas, na mesma ordem do DF:
+      - valores_medios: list[float|None]
+      - mercados:       list[str] (descrição/localidade)
+      - fontes:         list[str] (links ou nomes de lojas)
+    Pode consultar 'data/catalogo_precos.csv' como fallback simples.
+    """
+    # --- Exemplo mínimo com catálogo local ---
+    import csv, os
+
+    catalogo = []
+    path_cat = os.path.join("data", "catalogo_precos.csv")
+    if os.path.exists(path_cat):
+        with open(path_cat, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                catalogo.append(row)
+
+    valores, mercados, fontes = [], [], []
+    for _, row in df.iterrows():
+        desc = str(row.get("Descrição resumida PDF", "")).upper()
+        unidade = str(row.get("Unidade", "")).upper()
+
+        # matching tosco por substring no catálogo (apenas exemplo)
+        candidatos = []
+        for c in catalogo:
+            cdesc = str(c.get("descricao","")).upper()
+            cunid = str(c.get("unidade","")).upper()
+            if cdesc and cdesc in desc and (not unidade or cunid == unidade):
+                try:
+                    preco = float(str(c.get("preco","0")).replace(",", "."))
+                except:
+                    preco = None
+                candidatos.append((
+                    preco,
+                    c.get("mercado",""),
+                    c.get("fonte","")
+                ))
+        if candidatos:
+            # média simples dos preços válidos
+            precos_validos = [p for p,_,_ in candidatos if isinstance(p,(int,float))]
+            media = round(sum(precos_validos)/len(precos_validos), 2) if precos_validos else None
+            # só para exemplo, junta mercados/fontes
+            mercados_join = " | ".join(set([m for _,m,_ in candidatos if m]))
+            fontes_join   = " | ".join(set([f for *_,f in candidatos if f]))
+        else:
+            media = None
+            mercados_join = ""
+            fontes_join   = ""
+
+        valores.append(media)
+        mercados.append(mercados_join)
+        fontes.append(fontes_join)
+
+    return valores, mercados, fontes
+
+
