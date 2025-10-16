@@ -1,4 +1,6 @@
-import importlib, os, pandas as pd
+import importlib
+import os
+import pandas as pd
 
 def test_assinatura_buscar_precos():
     mod = importlib.import_module("price_search")
