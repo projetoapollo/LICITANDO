@@ -1,14 +1,15 @@
+# imports
+import io
 import os
-import sys
+import sys   # precisa para usar sys.version
 import time
-from io import BytesIO
 
 import pandas as pd
 import streamlit as st
 
-
 from script_principal_turbo import processar_pdf
 from price_search import buscar_precos
+from observability import notify_error  # se você usa notify_error neste arquivo
 
 # ===== Config =====
 DEFAULT_FILTRO_MINIMO = 0.70   # 70%
@@ -88,7 +89,7 @@ if st.session_state.rodar:
     barra = BarraProgresso(total_passos=4)
     try:
         barra.step("Lendo PDF e extraindo itens…")
-        df = processar_pdf(BytesIO(st.session_state.pdf_bytes))
+        df = processar_pdf(io.BytesIO(st.session_state.pdf_bytes))
         if df is None or df.empty:
             st.warning("Nenhum item encontrado no PDF.")
             st.session_state.rodar = False
@@ -109,7 +110,7 @@ if st.session_state.rodar:
         df["Fontes"] = fontes
 
         barra.step("Gerando planilha Excel…")
-        output_excel = BytesIO()
+        output_excel = io.BytesIO()
         with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
         output_excel.seek(0)
@@ -131,6 +132,7 @@ if st.session_state.rodar:
         st.session_state.rodar = False
 else:
     st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
+
 
 
 
