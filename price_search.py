@@ -219,15 +219,17 @@ def buscar_precos(df: pd.DataFrame, similaridade_minima: float = 0.7):
             cdesc = str(c.get("descricao","")).upper()
             cunid = str(c.get("unidade","")).upper()
             if cdesc and cdesc in desc and (not unidade or cunid == unidade):
-                try:
-    preco = float(str(c.get("preco", "0")).replace(",", "."))
-except (TypeError, ValueError, AttributeError):
-    preco = None
-                candidatos.append((
-                    preco,
-                    c.get("mercado",""),
-                    c.get("fonte","")
-                ))
+    try:
+        preco = float(str(c.get("preco", "0")).replace(",", "."))
+    except (TypeError, ValueError, AttributeError):
+        preco = None
+
+    candidatos.append((
+        preco,
+        c.get("mercado", ""),
+        c.get("fonte", ""),
+    ))
+
         if candidatos:
     # preços válidos
     precos_validos = [p for (p, _m, _f) in candidatos if isinstance(p, (int, float))]
@@ -247,6 +249,7 @@ mercados.append(mercados_join)
 fontes.append(fontes_join)
 
 return valores, mercados, fontes
+
 
 
 
