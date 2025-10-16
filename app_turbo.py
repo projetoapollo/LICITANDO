@@ -88,7 +88,7 @@ if st.session_state.rodar:
     barra = BarraProgresso(total_passos=4)
     try:
         barra.step("Lendo PDF e extraindo itens…")
-        df = processar_pdf(io.BytesIO(st.session_state.pdf_bytes))
+        df = processar_pdf(BytesIO(st.session_state.pdf_bytes))
         if df is None or df.empty:
             st.warning("Nenhum item encontrado no PDF.")
             st.session_state.rodar = False
@@ -131,6 +131,7 @@ if st.session_state.rodar:
         st.session_state.rodar = False
 else:
     st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
+
 
 
 
