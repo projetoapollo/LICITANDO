@@ -23,8 +23,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install ruff mypy bandit pytest
-      - name: Lint (ruff)
-        run: ruff check .
+     - name: Formatar (ruff)
+  run: ruff format .
+
+- name: Lint (ruff)
+  run: ruff check . --fix
+
       - name: Tipos (mypy)
         run: mypy .
       - name: Segurança (bandit)
