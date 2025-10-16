@@ -60,7 +60,7 @@ with st.expander("Diagnóstico rápido (pode recolher)", expanded=False):
 from script_principal_turbo import processar_pdf
 from price_search import buscar_precos  # assinatura: (df, similaridade_minima=0.7)
 
-st.divider()
+st.markdown("---")
 
 # ===== UI principal =====
 uploaded_file = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"])
@@ -129,4 +129,5 @@ if st.session_state.rodar:
         st.session_state.rodar = False
 else:
     st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
+
 
