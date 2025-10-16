@@ -182,3 +182,4 @@ def buscar_precos(
         catalogo.drop(columns=["__sim"], inplace=True)
 
     return valores, mercados, fontes
+
