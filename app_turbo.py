@@ -1,9 +1,11 @@
-import io
 import os
+import sys
 import time
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+
 
 from script_principal_turbo import processar_pdf
 from price_search import buscar_precos
@@ -129,5 +131,6 @@ if st.session_state.rodar:
         st.session_state.rodar = False
 else:
     st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
+
 
 
