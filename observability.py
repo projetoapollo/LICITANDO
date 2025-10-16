@@ -8,7 +8,7 @@ from typing import Optional, Callable, Any
 
 # Detecta se Streamlit está disponível
 try:
-    import streamlit as st  # type: ignore
+    import streamlit as st
     _HAS_ST = True
 except Exception:  # pragma: no cover
     st = None  # type: ignore[assignment]
@@ -23,7 +23,6 @@ def get_run_id() -> str:
         if _RUN_ID_KEY not in st.session_state:
             st.session_state[_RUN_ID_KEY] = str(int(time.time() * 1000))
         return str(st.session_state[_RUN_ID_KEY])
-
     # fallback fora do Streamlit
     return os.environ.get("RUN_ID", str(int(time.time() * 1000)))
 
@@ -49,10 +48,7 @@ def notify_error(
 
 
 def guard(step_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """
-    Decorator no-op com logging simples.
-    Ex.: @guard("buscar_precos")
-    """
+    """Decorator no-op com logging simples."""
     def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         qual = f"{fn.__module__}.{fn.__name__}"
 
@@ -68,5 +64,4 @@ def guard(step_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
                 _stdout_log("INFO", "step_end", step=step_name, func=qual)
 
         return _wrap
-
     return _decorator
