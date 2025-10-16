@@ -229,22 +229,26 @@ except (TypeError, ValueError, AttributeError):
                     c.get("fonte","")
                 ))
         if candidatos:
-            # média simples dos preços válidos
-            precos_validos = [p for p,_,_ in candidatos if isinstance(p,(int,float))]
-            media = round(sum(precos_validos)/len(precos_validos), 2) if precos_validos else None
-            # só para exemplo, junta mercados/fontes
-            mercados_join = " | ".join(set([m for _,m,_ in candidatos if m]))
-            fontes_join   = " | ".join(set([f for *_,f in candidatos if f]))
-        else:
-            media = None
-            mercados_join = ""
-            fontes_join   = ""
+    # preços válidos
+    precos_validos = [p for (p, _m, _f) in candidatos if isinstance(p, (int, float))]
+    media = round(sum(precos_validos) / len(precos_validos), 2) if precos_validos else None
 
-        valores.append(media)
-        mercados.append(mercados_join)
-        fontes.append(fontes_join)
+    # juntar mercados/fontes (únicos)
+    mercados_join = " | ".join(sorted({m for (_p, m, _f) in candidatos if m}))
+    fontes_join = " | ".join(sorted({f for (_p, _m, f) in candidatos if f}))
+else:
+    media = None
+    mercados_join = ""
+    fontes_join = ""
 
-    return valores, mercados, fontes
+# acrescentar resultados (fora do if/else)
+valores.append(media)
+mercados.append(mercados_join)
+fontes.append(fontes_join)
+
+return valores, mercados, fontes
+
+
 
 
 
