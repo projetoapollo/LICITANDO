@@ -1,8 +1,12 @@
-# app_turbo.py
-import os, sys, io, time
-import streamlit as st
+import io
+import os
+import time
+
 import pandas as pd
-from io import BytesIO
+import streamlit as st
+
+from script_principal_turbo import processar_pdf
+from price_search import buscar_precos
 
 # ===== Config =====
 DEFAULT_FILTRO_MINIMO = 0.70   # 70%
@@ -125,3 +129,4 @@ if st.session_state.rodar:
         st.session_state.rodar = False
 else:
     st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
+
