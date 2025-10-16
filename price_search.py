@@ -1,209 +1,166 @@
-# app_turbo.py
-# -------------------------------
-# App Streamlit: LICITANDO Turbo
-# Fluxo: PDF -> parser -> busca preços -> Excel (com logo) -> download
-# -------------------------------
-
+# price_search.py
 from __future__ import annotations
 
+import math
 import os
-import time
-from io import BytesIO
-from typing import Optional, Tuple, List
+import re
+from typing import List, Tuple, Optional
 
-import streamlit as st
 import pandas as pd
+from observability import guard  # usamos só o guard daqui
 
-# Imports "da casa" DEVEM ficar no topo (corrige E402 no CI)
-from script_principal_turbo import processar_pdf
-from price_search import buscar_precos  # assinatura: (df, min_score=0.7)
-
-# Tentar utilitários de observabilidade (opcional)
-try:
-    from observability import notify_error  # type: ignore
-except Exception:  # fallback no-op
-    def notify_error(msg: str, exc: Optional[BaseException] = None) -> None:
-        st.error(msg)
-        if exc:
-            st.exception(exc)
-
-# Excel (openpyxl) e imagem (logo)
-try:
-    from openpyxl import Workbook
-    from openpyxl.drawing.image import Image as XLImage
-except Exception as _exc:
-    notify_error(
-        "Pacote 'openpyxl' não encontrado. Verifique seu requirements.txt (openpyxl).",
-        _exc,
-    )
-    raise
-
-# Caminhos padrão
-LOGO_CAMINHO = "static/logo_apolari.png"
 CATALOGO_ARQ = "data/catalogo_precos.csv"
 
-# --------------------------------------------------------------------
-# Compat: Streamlit < 1.22.0 (st.divider não existe nessas versões)
-# --------------------------------------------------------------------
-def safe_divider() -> None:
-    if hasattr(st, "divider"):
-        st.divider()
-    else:
-        st.markdown("---")
+# Helpers de normalização/semelhança
+_SPACES = re.compile(r"\s+")
+_PUNCTS = re.compile(r"[^\w\s]", flags=re.UNICODE)
 
 
-# --------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------
-def _garante_colunas_minimas(df: pd.DataFrame) -> pd.DataFrame:
-    """Garante as colunas que o fluxo precisa após o parser."""
-    colunas_necessarias = [
-        "Código PDF",
-        "Descrição resumida PDF",
-        "Unidade",
-        "Quantidade",
-    ]
-    for c in colunas_necessarias:
-        if c not in df.columns:
-            df[c] = ""
+def _norm_txt(txt: str) -> str:
+    """Normaliza texto para comparação de tokens."""
+    if not isinstance(txt, str):
+        return ""
+    txt = txt.lower()
+    txt = _PUNCTS.sub(" ", txt)
+    txt = _SPACES.sub(" ", txt).strip()
+    return txt
 
-    # força coluna QUANT PESQ (1) = 1
-    if "QUANT PESQ (1)" not in df.columns:
-        df["QUANT PESQ (1)"] = 1
+
+def _token_set_overlap(a: str, b: str) -> float:
+    """Similaridade Jaccard simples (0..1) entre conjuntos de tokens."""
+    if not a or not b:
+        return 0.0
+    sa = set(_norm_txt(a).split())
+    sb = set(_norm_txt(b).split())
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    uni = len(sa | sb)
+    return inter / uni if uni else 0.0
+
+
+def _to_float(x: object) -> float:
+    try:
+        return float(str(x).replace(",", "."))
+    except Exception:
+        return math.nan
+
+
+def _carregar_catalogo(path: str = CATALOGO_ARQ) -> pd.DataFrame:
+    """
+    Lê o catálogo local. Espera colunas:
+    descricao, unidade, preco, mercado, fonte, codigo
+    """
+    if not os.path.exists(path):
+        return pd.DataFrame(
+            columns=["descricao", "unidade", "preco", "mercado", "fonte", "codigo"]
+        )
+
+    df = pd.read_csv(path, encoding="utf-8")
+    for col in ["descricao", "unidade", "preco", "mercado", "fonte", "codigo"]:
+        if col not in df.columns:
+            df[col] = ""
+
+    df["descricao"] = df["descricao"].astype(str)
+    df["unidade"] = df["unidade"].astype(str)
+    df["mercado"] = df["mercado"].astype(str)
+    df["fonte"] = df["fonte"].astype(str)
+    df["codigo"] = df["codigo"].astype(str)
+    df["preco"] = df["preco"].map(_to_float)
+
+    # colunas auxiliares
+    df["_desc_norm"] = df["descricao"].map(_norm_txt)
+    df["_codigo_norm"] = df["codigo"].str.strip()
 
     return df
 
 
-def _gerar_excel(df_final: pd.DataFrame, logo_path: str = LOGO_CAMINHO) -> bytes:
+@guard("buscar_precos")
+def buscar_precos(
+    df: pd.DataFrame,
+    min_score: float = 0.7,
+    *,
+    similaridade_minima: Optional[float] = None,  # alias opcional
+) -> Tuple[List[float], List[str], List[str]]:
     """
-    Gera um Excel em memória com aba 'Cotacao_Final' e aplica logo (se existir).
-    Retorna bytes do arquivo .xlsx.
+    Retorna 3 listas (mesma ordem do DF):
+      - valores (média/preço encontrado por item)
+      - mercados (descrição/localidade)
+      - fontes (URL/nome da fonte)
+
+    Regras:
+      1) Se existir 'Código PDF', tenta casar por código (cat.codigo).
+      2) Se não casar por código, tenta por similaridade de descrição
+         ('Descrição resumida PDF' ~ cat.descricao) com limiar.
     """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Cotacao_Final"
+    # compat: permitir passar "similaridade_minima"
+    if similaridade_minima is not None:
+        min_score = float(similaridade_minima)
 
-    # escreve cabeçalhos
-    ws.append(list(df_final.columns))
+    # defensivo
+    if df is None or df.empty:
+        n = 0 if df is None else len(df)
+        return [math.nan] * n, [""] * n, [""] * n
 
-    # escreve linhas
-    for _, row in df_final.iterrows():
-        ws.append(list(row.values))
+    catalogo = _carregar_catalogo(CATALOGO_ARQ)
 
-    # tenta inserir logo
-    try:
-        if logo_path and os.path.exists(logo_path):
-            img = XLImage(logo_path)
-            # posiciona a logo no canto superior (A1) sem quebrar o layout
-            ws.add_image(img, "A1")
-    except Exception as exc:
-        # não falha o app por causa de logo
-        notify_error("Não foi possível aplicar a logo ao Excel (seguimos sem logo).", exc)
+    n = len(df)
+    valores: List[float] = [math.nan] * n
+    mercados: List[str] = [""] * n
+    fontes: List[str] = [""] * n
 
-    # salva em bytes
-    buff = BytesIO()
-    wb.save(buff)
-    buff.seek(0)
-    return buff.read()
+    if catalogo.empty:
+        return valores, mercados, fontes
 
+    tem_cod = "Código PDF" in df.columns
+    tem_desc = "Descrição resumida PDF" in df.columns
 
-def _aplicar_ping() -> None:
-    """Toca um 'ping' simples ao finalizar (se disponível)."""
-    try:
-        # 440 Hz senoide rápida embutida (opcionalmente você pode usar st.audio de um arquivo)
-        import numpy as np
+    for idx, row in df.reset_index(drop=True).iterrows():
+        melhor_preco = math.nan
+        melhor_mercado = ""
+        melhor_fonte = ""
+        achou = False
 
-        sr = 22050
-        t = np.linspace(0, 0.15, int(sr * 0.15), endpoint=False)
-        wave = 0.2 * np.sin(2 * np.pi * 880 * t)  # 880 Hz
-        st.audio(wave, sample_rate=sr)
-    except Exception:
-        # como fallback, um celebrate visual
-        st.balloons()
+        # 1) por código
+        if tem_cod:
+            cod = str(row.get("Código PDF", "")).strip()
+            if cod:
+                sub = catalogo[catalogo["_codigo_norm"] == cod]
+                if not sub.empty:
+                    preco = sub["preco"].mean(skipna=True)
+                    if not math.isnan(preco):
+                        melhor_preco = float(preco)
+                        melhor_mercado = "; ".join(
+                            sub["mercado"].dropna().astype(str).unique().tolist()
+                        )
+                        melhor_fonte = "; ".join(
+                            sub["fonte"].dropna().astype(str).unique().tolist()
+                        )
+                        achou = True
 
+        # 2) por similaridade
+        if not achou and tem_desc:
+            desc_norm = _norm_txt(str(row.get("Descrição resumida PDF", "")))
+            if desc_norm:
+                catalogo["__sim"] = catalogo["_desc_norm"].map(
+                    lambda d: _token_set_overlap(d, desc_norm)
+                )
+                sub = catalogo[catalogo["__sim"] >= float(min_score)]
+                if not sub.empty:
+                    best = sub.sort_values("__sim", ascending=False).iloc[0]
+                    preco = _to_float(best["preco"])
+                    if not math.isnan(preco):
+                        melhor_preco = float(preco)
+                        melhor_mercado = str(best["mercado"])
+                        melhor_fonte = str(best["fonte"])
+                        achou = True
 
-# --------------------------------------------------------------------
-# UI
-# --------------------------------------------------------------------
-st.set_page_config(page_title="LICITANDO Turbo", page_icon="⚡", layout="wide")
-st.title("⚡ Sistema Appolari Turbo V3.2")
-st.caption("PDF → Itens → Busca de preços → Excel com logo")
+        valores[idx] = melhor_preco
+        mercados[idx] = melhor_mercado
+        fontes[idx] = melhor_fonte
 
-safe_divider()
+    # limpa coluna temporária se criada
+    if "__sim" in catalogo.columns:
+        catalogo.drop(columns=["__sim"], inplace=True)
 
-with st.sidebar:
-    st.header("Configurações")
-    sim_pct = st.slider("Filtro mínimo de similaridade (%)", min_value=50, max_value=90, value=70, step=1)
-    min_score = sim_pct / 100.0
-    st.write(f"Similaridade mínima: **{sim_pct}%**")
-
-arquivo_pdf = st.file_uploader("Envie o PDF (um arquivo)", type=["pdf"])
-
-col1, col2 = st.columns([1, 3])
-with col1:
-    iniciar = st.button("🚀 Processar")
-with col2:
-    st.info(
-        "Fluxo: **ler PDF → preparar colunas → pesquisar preços → gerar Excel**.\n"
-        "Ao final você poderá **baixar** a planilha.",
-        icon="ℹ️",
-    )
-
-safe_divider()
-
-barra = st.progress(0, text="Aguardando…")
-
-# --------------------------------------------------------------------
-# Execução
-# --------------------------------------------------------------------
-if iniciar:
-    if not arquivo_pdf:
-        st.warning("Envie um PDF para começar.", icon="⚠️")
-    else:
-        try:
-            etapa = "Lendo PDF"
-            barra.progress(5, text=f"{etapa}…")
-            time.sleep(0.1)
-
-            # 1) Parser PDF -> DataFrame base
-            df_base = processar_pdf(arquivo_pdf)
-            if not isinstance(df_base, pd.DataFrame) or df_base.empty:
-                raise RuntimeError("Parser retornou DataFrame vazio.")
-
-            # 2) Garante colunas
-            etapa = "Preparando colunas"
-            barra.progress(25, text=f"{etapa}…")
-            df_base = _garante_colunas_minimas(df_base)
-
-            # 3) Busca de preços
-            etapa = "Pesquisando preços"
-            barra.progress(55, text=f"{etapa} (catálogo interno: {CATALOGO_ARQ})…")
-            valores, mercados, fontes = buscar_precos(df_base, min_score=min_score)
-
-            # 4) Monta DF final para Excel
-            etapa = "Gerando Excel"
-            barra.progress(80, text=f"{etapa}…")
-
-            df_out = df_base.copy()
-            # nomes seguindo seu resumo
-            df_out["Valor médio do produto"] = valores
-            df_out["Mercado"] = mercados
-            df_out["Fontes"] = fontes
-
-            xlsx_bytes = _gerar_excel(df_out, LOGO_CAMINHO)
-
-            barra.progress(100, text="Concluído!")
-            _aplicar_ping()
-
-            st.success("Planilha gerada com sucesso! Faça o download abaixo.", icon="✅")
-            st.download_button(
-                label="⬇️ Baixar Excel (Cotacao_Final.xlsx)",
-                data=xlsx_bytes,
-                file_name="Cotacao_Final.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-        except Exception as exc:
-            notify_error("Ops! Ocorreu um erro durante o processamento.", exc)
-        finally:
-            time.sleep(0.05)
+    return valores, mercados, fontes
