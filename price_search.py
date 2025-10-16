@@ -231,7 +231,7 @@ for c in catalogo:
             c.get("fonte", ""),
         ))         
 
-        if candidatos:
+       if candidatos:
     # preços válidos
     precos_validos = [p for (p, _m, _f) in candidatos if isinstance(p, (int, float))]
     media = round(sum(precos_validos) / len(precos_validos), 2) if precos_validos else None
@@ -250,6 +250,7 @@ mercados.append(mercados_join)
 fontes.append(fontes_join)
 
 return valores, mercados, fontes
+
 
 
 
