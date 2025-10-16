@@ -220,9 +220,9 @@ def buscar_precos(df: pd.DataFrame, similaridade_minima: float = 0.7):
             cunid = str(c.get("unidade","")).upper()
             if cdesc and cdesc in desc and (not unidade or cunid == unidade):
                 try:
-                    preco = float(str(c.get("preco","0")).replace(",", "."))
-                except:
-                    preco = None
+    preco = float(str(c.get("preco", "0")).replace(",", "."))
+except (TypeError, ValueError, AttributeError):
+    preco = None
                 candidatos.append((
                     preco,
                     c.get("mercado",""),
@@ -245,5 +245,6 @@ def buscar_precos(df: pd.DataFrame, similaridade_minima: float = 0.7):
         fontes.append(fontes_join)
 
     return valores, mercados, fontes
+
 
 
