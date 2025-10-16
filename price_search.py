@@ -216,33 +216,38 @@ def buscar_precos(df: pd.DataFrame, similaridade_minima: float = 0.7):
         # matching tosco por substring no catálogo (apenas exemplo)
         candidatos = []
  
-for c in catalogo:
-    cdesc = str(c.get("descricao","")).upper()
-    cunid = str(c.get("unidade","")).upper()
-    if cdesc and cdesc in desc and (not unidade or cunid == unidade):
-        try:
-            preco = float(str(c.get("preco", "0")).replace(",", "."))
-        except (TypeError, ValueError, AttributeError):
-            preco = None
+        for c in catalogo:
+            cdesc = str(c.get("descricao","")).upper()
+            cunid = str(c.get("unidade","")).upper()
+            if cdesc and cdesc in desc and (not unidade or cunid == unidade):
+                try:
+                    preco = float(str(c.get("preco", "0")).replace(",", "."))
+                except (TypeError, ValueError, AttributeError):
+                    preco = None
 
-        candidatos.append((
-            preco,
-            c.get("mercado", ""),
-            c.get("fonte", ""),
-        ))         
+                candidatos.append((
+                    preco,
+                    c.get("mercado", ""),
+                    c.get("fonte", ""),
+                ))
 
-       if candidatos:
-    # preços válidos
-    precos_validos = [p for (p, _m, _f) in candidatos if isinstance(p, (int, float))]
-    media = round(sum(precos_validos) / len(precos_validos), 2) if precos_validos else None
+        if candidatos:
+            # preços válidos
+            precos_validos = [p for (p, _m, _f) in candidatos if isinstance(p, (int, float))]
+            media = round(sum(precos_validos) / len(precos_validos), 2) if precos_validos else None
 
-    # juntar mercados/fontes (únicos)
-    mercados_join = " | ".join(sorted({m for (_p, m, _f) in candidatos if m}))
-    fontes_join = " | ".join(sorted({f for (_p, _m, f) in candidatos if f}))
-else:
-    media = None
-    mercados_join = ""
-    fontes_join = ""
+            # juntar mercados/fontes (únicos)
+            mercados_join = " | ".join(sorted({m for (_p, m, _f) in candidatos if m}))
+            fontes_join = " | ".join(sorted({f for (_p, _m, f) in candidatos if f}))
+        else:
+            media = None
+            mercados_join = ""
+            fontes_join = ""
+
+        # acrescentar resultados (fora do if/else)
+        valores.append(media)
+        mercados.append(mercados_join)
+        fontes.append(fontes_join)
 
 # acrescentar resultados (fora do if/else)
 valores.append(media)
@@ -250,6 +255,7 @@ mercados.append(mercados_join)
 fontes.append(fontes_join)
 
 return valores, mercados, fontes
+
 
 
 
