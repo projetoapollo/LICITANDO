@@ -1,7 +1,16 @@
 # observability.py
 from __future__ import annotations
-import os, sys, json, time, functools, traceback
-from typing import Any, Callable, Optional
+from typing import Optional
+
+def guard(_name: str):
+    def _decorator(fn):
+        return fn
+    return _decorator
+
+def notify_error(text: str, *, exc: Optional[BaseException] = None, step: str = "") -> None:
+    # Aqui você pode fazer log/print/streamlit, por enquanto deixo no-op
+    # print(f"[ERRO] {step}: {text} - {exc!r}")
+    pass
 
 # Detecta se Streamlit está disponível
 try:
