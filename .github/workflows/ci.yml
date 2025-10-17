@@ -43,4 +43,6 @@ jobs:
         continue-on-error: true
 
       - name: Testes (pytest)
-        run: pytest -q
+        env:
+        id: ${{ github.workspace }}
+        run: python -m pytest -q
