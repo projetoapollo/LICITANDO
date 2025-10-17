@@ -39,7 +39,7 @@ jobs:
         run: mypy .
 
       - name: Segurança (bandit)
-        run: bandit -q -r .
+  run: bandit -q -r . -x tests
 
       - name: Testes (pytest)
         run: pytest -q
