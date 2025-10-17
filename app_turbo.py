@@ -1,5 +1,5 @@
 # =========================
-# app_turbo.py  (versão revisada)
+# Sistema Appolari Turbo V3.2
 # =========================
 from __future__ import annotations
 
@@ -7,61 +7,50 @@ import io
 import os
 import sys
 import time
+from typing import Any, Callable
 
 import pandas as pd
 import streamlit as st
 
+# observabilidade opcional (guard + notify_error com fallback seguro)
+try:
+    from observability import guard, notify_error  # type: ignore
+except Exception:
+    def guard(_name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def _decor(fn: Callable[..., Any]) -> Callable[..., Any]:
+            return fn
+        return _decor
+
+    def notify_error(_step: str, exc: BaseException | None = None, **_kw: Any) -> None:
+        return None
+
 from script_principal_turbo import processar_pdf
 from price_search import buscar_precos
 
-# -------------------------
-# observabilidade opcional (fallback silencioso)
-# -------------------------
-try:
-    from observability import notify_error  # type: ignore
-except Exception:  # pragma: no cover
-    def notify_error(_step: str, exc: BaseException | None = None, **_kwargs) -> None:
-        # no-op
-        return None
-
-# -------------------------
-# constantes
-# -------------------------
+# =========================
+# Constantes
+# =========================
 DEFAULT_FILTRO_MINIMO = 0.70  # 70%
 
-# -------------------------
-# configuração da página
-# -------------------------
+# =========================
+# Configuração da página
+# =========================
 st.set_page_config(
     page_title="Sistema Appolari Turbo",
     page_icon="⚙️",
     layout="wide",
 )
 
-# -------------------------
-# helpers
-# -------------------------
-def tocar_ping() -> None:
-    """Feedback visual rápido ao concluir."""
-    try:
-        st.toast("Processo concluído!", icon="✅")
-    except Exception:
-        pass
-
-def set_session_default(key: str, value) -> None:
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-# -------------------------
-# CSS mínimo (injeta uma vez)
-# -------------------------
+# =========================
+# Injeção mínima de CSS
+# =========================
 if "ui_injetada" not in st.session_state:
     st.markdown(
         """
         <style>
           .site-content { margin: 0 auto; }
           header { margin: .75rem 0; }
-          main   { margin-bottom: 1rem; }
+          main { margin-bottom: 1rem; }
           footer { padding-bottom: 1.25rem; }
         </style>
         """,
@@ -69,126 +58,101 @@ if "ui_injetada" not in st.session_state:
     )
     st.session_state.ui_injetada = True
 
-# -------------------------
-# estado inicial (preservado entre reruns)
-# -------------------------
-set_session_default("pdf_bytes", None)
-set_session_default("rodar", False)
-set_session_default("log", [])
-set_session_default("df_itens", None)
-set_session_default("resultado", None)
-set_session_default("filtro_min", DEFAULT_FILTRO_MINIMO)
+# =========================
+# Estado inicial persistente
+# =========================
+if "pdf_bytes" not in st.session_state:
+    st.session_state.pdf_bytes = None
+if "rodar" not in st.session_state:
+    st.session_state.rodar = False
+if "log" not in st.session_state:
+    st.session_state.log = []
+if "df_itens" not in st.session_state:
+    st.session_state.df_itens = None
+if "resultado" not in st.session_state:
+    st.session_state.resultado = None
 
-# -------------------------
-# título + diagnóstico (pode recolher)
-# -------------------------
+# =========================
+# Título e diagnóstico rápido
+# =========================
 st.title("Sistema Appolari Turbo v3.2")
 with st.expander("Diagnóstico rápido (pode recolher)", expanded=False):
     st.write("Python:", sys.version.split()[0])
     st.json({"cwd": os.getcwd(), "time": time.strftime("%Y-%m-%d %H:%M:%S")})
 
-# -------------------------
-# UI principal
-# -------------------------
+# =========================
+# Interface principal
+# =========================
 uploaded_file = st.file_uploader("📄 Envie o PDF de cotação", type=["pdf"])
 if uploaded_file is not None:
     st.session_state.pdf_bytes = uploaded_file.getvalue()
     st.success("✅ PDF carregado com sucesso!")
 
-filtro_pct = st.slider(
+filtro_min = st.slider(
     "Filtro mínimo de similaridade (%)",
     min_value=50,
-    max_value=100,
-    value=int(st.session_state.filtro_min * 100),
+    max_value=90,
+    value=int(DEFAULT_FILTRO_MINIMO * 100),
     help="Itens com score abaixo disso são descartados na busca de preço.",
-)
-st.session_state.filtro_min = filtro_pct / 100.0
+) / 100.0
 
-if st.button("🚀 Rodar Sistema Appolari", type="primary"):
+if st.button("▶️ Rodar Sistema Appolari", type="primary"):
     if st.session_state.pdf_bytes:
         st.session_state.rodar = True
         st.session_state.log = []
     else:
         st.warning("Envie um PDF antes de rodar.")
 
-# -------------------------
-# execução
-# -------------------------
+# =========================
+# Execução principal
+# =========================
 if st.session_state.rodar:
-    progress = st.progress(0, text="Lendo PDF e extraindo itens...")
     try:
-        # 1) ler PDF -> DataFrame
+        st.info("⏳ Lendo PDF e extraindo itens…")
         df = processar_pdf(io.BytesIO(st.session_state.pdf_bytes))
-        progress.progress(20, text="PDF lido. Normalizando/checando itens...")
 
         if df is None or df.empty:
-            st.warning("Nenhum item encontrado no PDF.")
+            st.warning("⚠️ Nenhum item encontrado no PDF.")
             st.session_state.rodar = False
-        else:
-            st.session_state.log.append(
-                f"[{time.strftime('%H:%M:%S')}] Itens extraídos: {len(df)}"
-            )
-            # garantir colunas opcionais
-            if "QUANT PESQ (1)" not in df.columns:
-                df["QUANT PESQ (1)"] = 1
-            if "Status" not in df.columns:
-                df["Status"] = "OK"
+            st.stop()
 
-            # 2) buscar preços
-            progress.progress(55, text="Buscando preços no catálogo...")
-            valores_medios, mercados, fontes = buscar_precos(
-                df,
-                similaridade_minima=st.session_state.filtro_min,
-            )
+        st.session_state.log.append(f"[{time.strftime('%H:%M:%S')}] Itens extraídos: {len(df)}")
 
-            # 3) montar resultado
-            progress.progress(85, text="Montando resultado...")
-            df_out = df.copy()
-            df_out["Valor médio do produto"] = valores_medios
-            df_out["Descrição localidade / Mercado"] = mercados
-            df_out["Fontes"] = fontes
+        # Garante colunas obrigatórias
+        if "QUANT PESQ (1)" not in df.columns:
+            df["QUANT PESQ (1)"] = 1
+        if "Status" not in df.columns:
+            df["Status"] = "OK"
 
-            st.session_state.resultado = df_out
-            progress.progress(100, text="Concluído!")
-            st.success("✅ Processamento concluído com sucesso.")
-            tocar_ping()
+        st.info("🔎 Pesquisando preços e fontes…")
+        valores_medios, mercados, fontes = buscar_precos(df, similaridade_minima=filtro_min)
+        df["Valor médio do produto"] = valores_medios
+        df["Descrição localidade / Mercado"] = mercados
+        df["Fontes"] = fontes
 
-    except Exception as exc:
-        notify_error("execucao_app", exc=exc)
-        st.error("❌ Falha no processamento. Detalhes abaixo.")
-        st.exception(exc)
-        st.session_state.log.append(f"[{time.strftime('%H:%M:%S')}] ERRO: {exc!r}")
+        st.info("📊 Gerando planilha Excel…")
+        output_excel = io.BytesIO()
+        with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Cotacao_Final")
+        output_excel.seek(0)
+
+        st.success("✅ Processamento concluído com sucesso!")
+        st.dataframe(df, use_container_width=True, height=420)
+        st.download_button(
+            "📥 Baixar planilha gerada",
+            data=output_excel,
+            file_name="cotacao_final.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    except Exception as e:
+        notify_error("execucao_app", exc=e)
+        st.error("❌ Falha no processamento. Veja detalhes abaixo.")
+        st.exception(e)
+        st.session_state.log.append(f"[{time.strftime('%H:%M:%S')}] ERRO: {repr(e)}")
+
     finally:
         st.session_state.rodar = False
 
-# -------------------------
-# resultados
-# -------------------------
-if st.session_state.resultado is not None:
-    st.markdown("---")
-    st.subheader("Resultado da cotação")
-    st.dataframe(st.session_state.resultado, use_container_width=True)
-
-    # download em Excel
-    try:
-        bio = io.BytesIO()
-        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-            st.session_state.resultado.to_excel(
-                writer, index=False, sheet_name="Cotacao_Final"
-            )
-        st.download_button(
-            label="📥 Baixar planilha gerada",
-            data=bio.getvalue(),
-            file_name="cotacao_final.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
-        )
-    except Exception as exc:
-        notify_error("gerar_excel", exc=exc)
-        st.info("Não foi possível gerar o Excel agora.")
-
-# mensagem inicial
-if not st.session_state.pdf_bytes and st.session_state.resultado is None:
+else:
     st.info("Envie um PDF e clique em **Rodar Sistema Appolari** para começar.")
